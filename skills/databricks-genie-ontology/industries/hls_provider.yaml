@@ -1,0 +1,173 @@
+# HLS - healthcare provider (hospital network): encounters, readmissions, revenue cycle.
+# Synthetic data only. Never load real PHI into a demo; see references/08-safety-and-permissions.md.
+spec_version: 1
+industry: hls_provider
+title: Healthcare Provider
+description: "Patient encounters, clinical operations and revenue cycle for a hospital network"
+catalog: genie_ontology_hls_provider
+schema: provider_demo
+seed: 41
+history_days: 730
+domains: [Clinical, Revenue Cycle, Patient]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_patient:
+    kind: dimension
+    rows: 400
+    comment: "Patient dimension (synthetic). Direct identifiers are tagged pii."
+    domains: [Patient]
+    columns:
+      patient_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the patient"}
+      patient_name: {type: string, gen: template, template: "Patient {i:04d}", pii: true, comment: "Patient display name (synthetic)"}
+      age_band: {type: string, gen: choice, values: [0-17, 18-39, 40-64, 65-79, 80+], weights: [1, 3, 4, 3, 1], comment: "Age band"}
+      payer_type: {type: string, gen: choice, values: [Medicare, Medicaid, Commercial, Self-Pay], weights: [3, 2, 4, 1], comment: "Primary payer type"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Patient home region"}
+  dim_provider:
+    kind: dimension
+    rows: 40
+    comment: "Treating clinician dimension."
+    domains: [Clinical]
+    columns:
+      provider_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the clinician"}
+      provider_name: {type: string, gen: template, template: "Clinician {i:03d}", pii: true, comment: "Clinician display name (synthetic)"}
+      specialty: {type: string, gen: choice, values: [Cardiology, Orthopedics, Internal Medicine, Emergency Medicine, Pulmonology, Neurology], comment: "Clinical specialty"}
+  dim_facility:
+    kind: dimension
+    rows: 8
+    comment: "Hospital and clinic facilities."
+    domains: [Clinical]
+    columns:
+      facility_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the facility"}
+      facility_name: {type: string, gen: template, template: "Facility {i:02d}", comment: "Facility display name"}
+      facility_type: {type: string, gen: choice, values: [Hospital, Outpatient Clinic, Urgent Care], weights: [3, 4, 2], comment: "Facility type"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Facility region"}
+  dim_diagnosis:
+    kind: dimension
+    rows: 8
+    comment: "Primary diagnosis groups (ICD-10 style codes)."
+    domains: [Clinical]
+    columns:
+      diagnosis_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the diagnosis"}
+      icd10_code: {type: string, gen: template, template: "DX-{i:02d}", comment: "Diagnosis code (synthetic placeholder)"}
+      diagnosis_group: {type: string, gen: choice, values: [Cardiovascular, Respiratory, Diabetes, Musculoskeletal, Neurological, Infection], comment: "Diagnosis group"}
+  fact_encounters:
+    kind: fact
+    rows: 5000
+    comment: "Patient encounters. Grain: one encounter."
+    domains: [Clinical]
+    cluster_by: [date_key, facility_key]
+    columns:
+      encounter_id: {type: bigint, gen: seq, start: 300000, pk: true, comment: "Encounter identifier"}
+      date_key: {type: int, gen: date_key, comment: "Admission or visit date"}
+      patient_key: {type: int, gen: fk, fk: dim_patient.patient_key, skew: 0.5, comment: "Patient"}
+      provider_key: {type: int, gen: fk, fk: dim_provider.provider_key, comment: "Attending clinician"}
+      facility_key: {type: int, gen: fk, fk: dim_facility.facility_key, comment: "Facility"}
+      diagnosis_key: {type: int, gen: fk, fk: dim_diagnosis.diagnosis_key, comment: "Primary diagnosis"}
+      encounter_type: {type: string, gen: choice, values: [Inpatient, Outpatient, Emergency], weights: [2, 6, 3], comment: "Encounter type"}
+      inpatient_los: {type: int, gen: poisson, lam: 4, min: 1, hidden: true}
+      ed_los: {type: int, gen: poisson, lam: 0.6, hidden: true}
+      length_of_stay_days: {type: int, gen: derived, expr: "(encounter_type == 'Inpatient') * inpatient_los + (encounter_type == 'Emergency') * ed_los", check: ">= 0", comment: "Length of stay in days: 0 for outpatient visits, short for emergency, longer for inpatient"}
+      charge_base: {type: "decimal(12,2)", gen: lognormal, mean: 7.0, sigma: 0.7, min: 80, max: 60000, hidden: true}
+      total_charges: {type: "decimal(12,2)", gen: derived, expr: "charge_base * (1 + 2.5 * (encounter_type == 'Inpatient') - 0.4 * (encounter_type == 'Outpatient'))", check: "> 0", comment: "Total charges in USD (inpatient stays cost several times an outpatient visit)"}
+      readmit_u: {type: double, gen: uniform, min: 0.0, max: 1.0, hidden: true}
+      readmitted_30d: {type: boolean, gen: derived, expr: "readmit_u < (0.03 + 0.17 * (encounter_type == 'Inpatient'))", comment: "True if readmitted within 30 days (about 20% of inpatient stays, 3% otherwise)"}
+  fact_billing:
+    kind: fact
+    rows: 3500
+    comment: "Claims billed per encounter. Grain: one billed claim."
+    domains: [Revenue Cycle]
+    cluster_by: [date_key]
+    columns:
+      claim_id: {type: bigint, gen: seq, start: 800000, pk: true, comment: "Claim identifier"}
+      encounter_id: {type: bigint, gen: fk, fk: fact_encounters.encounter_id, unique: true, comment: "Encounter billed"}
+      date_key: {type: int, gen: date_key_after, via: encounter_id, column: date_key, max_days: 30, comment: "Claim submission date (on or after the encounter)"}
+      patient_key: {type: int, gen: lookup, via: encounter_id, column: patient_key, fk: dim_patient.patient_key, comment: "Patient (denormalized from the encounter)"}
+      facility_key: {type: int, gen: lookup, via: encounter_id, column: facility_key, fk: dim_facility.facility_key, comment: "Facility (denormalized from the encounter)"}
+      charges_ref: {type: "decimal(12,2)", gen: lookup, via: encounter_id, column: total_charges, hidden: true}
+      billed_amount: {type: "decimal(12,2)", gen: derived, expr: "charges_ref", check: "> 0", comment: "Amount billed to the payer in USD"}
+      paid_frac: {type: double, gen: uniform, min: 0.3, max: 0.95, hidden: true}
+      denied: {type: boolean, gen: bool, p: 0.09, comment: "True if the claim was denied"}
+      allowed_amount: {type: "decimal(12,2)", gen: derived, expr: "billed_amount * paid_frac", check: ">= 0", comment: "Contractually allowed amount in USD"}
+
+metric_views:
+  mv_clinical_operations:
+    source: fact_encounters
+    comment: "Certified clinical operations metrics. Readmission rate is the share of encounters readmitted within 30 days."
+    domains: [Clinical]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: patient, table: dim_patient, on: "source.patient_key = patient.patient_key"}
+      - {name: provider, table: dim_provider, on: "source.provider_key = provider.provider_key"}
+      - {name: facility, table: dim_facility, on: "source.facility_key = facility.facility_key"}
+      - {name: dx, table: dim_diagnosis, on: "source.diagnosis_key = dx.diagnosis_key"}
+    dimensions:
+      - {name: encounter_date, expr: date.calendar_date, display_name: "Encounter Date", synonyms: [visit date, admission date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: encounter_type, expr: source.encounter_type, display_name: "Encounter Type", synonyms: [visit type, care setting]}
+      - {name: specialty, expr: provider.specialty, display_name: "Specialty", synonyms: [clinical specialty]}
+      - {name: facility_name, expr: facility.facility_name, display_name: "Facility", synonyms: [hospital, site]}
+      - {name: facility_region, expr: facility.region, display_name: "Facility Region", synonyms: [region]}
+      - {name: diagnosis_group, expr: dx.diagnosis_group, display_name: "Diagnosis Group", synonyms: [condition, diagnosis]}
+      - {name: payer_type, expr: patient.payer_type, display_name: "Payer Type", synonyms: [payer, insurance type]}
+      - {name: age_band, expr: patient.age_band, display_name: "Age Band", synonyms: [age group]}
+    measures:
+      - {name: encounter_count, expr: "COUNT(DISTINCT source.encounter_id)", display_name: "Encounter Count", format: integer, synonyms: [visits, admissions, encounters]}
+      - {name: unique_patients, expr: "COUNT(DISTINCT source.patient_key)", display_name: "Unique Patients", format: integer, synonyms: [patients, patient count]}
+      - {name: avg_length_of_stay, expr: "AVG(source.length_of_stay_days)", display_name: "Average Length of Stay", format: decimal, comment: "Days; mix of inpatient and outpatient unless filtered", synonyms: [ALOS, LOS]}
+      - {name: readmission_rate, expr: "AVG(CASE WHEN source.readmitted_30d THEN 1.0 ELSE 0.0 END)", display_name: "30-Day Readmission Rate", format: rate, synonyms: [readmissions, readmit rate]}
+      - {name: total_charges, expr: "SUM(source.total_charges)", display_name: "Total Charges", format: currency, synonyms: [gross charges]}
+  mv_revenue_cycle:
+    source: fact_billing
+    comment: "Certified revenue cycle metrics. Collection rate = allowed amount of non-denied claims divided by billed amount."
+    domains: [Revenue Cycle]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: patient, table: dim_patient, on: "source.patient_key = patient.patient_key"}
+      - {name: facility, table: dim_facility, on: "source.facility_key = facility.facility_key"}
+    dimensions:
+      - {name: submission_date, expr: date.calendar_date, display_name: "Submission Date", synonyms: [claim date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: payer_type, expr: patient.payer_type, display_name: "Payer Type", synonyms: [payer]}
+      - {name: facility_name, expr: facility.facility_name, display_name: "Facility", synonyms: [hospital, site]}
+    measures:
+      - {name: claims_billed, expr: "COUNT(DISTINCT source.claim_id)", display_name: "Claims Billed", format: integer, synonyms: [claim count, claims]}
+      - {name: billed_amount, expr: "SUM(source.billed_amount)", display_name: "Billed Amount", format: currency, synonyms: [gross billing, charges billed]}
+      - {name: expected_collections, expr: "SUM(CASE WHEN source.denied THEN 0 ELSE source.allowed_amount END)", display_name: "Expected Collections", format: currency, synonyms: [allowed amount, net revenue]}
+      - {name: denial_rate, expr: "AVG(CASE WHEN source.denied THEN 1.0 ELSE 0.0 END)", display_name: "Denial Rate", format: rate, synonyms: [claim denial rate]}
+      - {name: collection_rate, expr: "SUM(CASE WHEN source.denied THEN 0 ELSE source.allowed_amount END) / SUM(source.billed_amount)", display_name: "Collection Rate", format: rate, synonyms: [yield, net collection rate]}
+
+agent:
+  name: Provider Analytics Genie
+  domain: Clinical
+  description: "Answers questions on encounters, readmissions and revenue cycle for a hospital network (synthetic data)."
+  sources: [mv_clinical_operations, mv_revenue_cycle]
+  instructions_intro: "You are a healthcare provider analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "Never show patient or clinician names. Aggregate to group level and suppress groups with fewer than 11 patients."
+    - "Average length of stay mixes encounter types: say which encounter types are included."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is the 30-day readmission rate by diagnosis group?"
+    - "What is the average length of stay for inpatient encounters by facility?"
+    - "Which payer type has the highest denial rate?"
+    - "Show collection rate by month."
+
+pages:
+  - name: 30-Day Readmission Rate
+    domain: Clinical
+    synonyms: [readmission rate, readmits]
+    description: "Share of encounters followed by a readmission within 30 days."
+    definition: "30-Day Readmission Rate = encounters with readmitted_30d = true divided by all encounters in the slice."
+    business_use: "Use readmission_rate in mv_clinical_operations. Filter to Inpatient when comparing with published hospital benchmarks."
+    related: [mv_clinical_operations, fact_encounters, Provider Analytics Genie]
+  - name: Collection Rate
+    domain: Revenue Cycle
+    synonyms: [net collection rate, yield]
+    description: "Expected collections from non-denied claims divided by billed amount."
+    definition: "Collection Rate = SUM(allowed_amount of non-denied claims) / SUM(billed_amount) on fact_billing."
+    business_use: "Use collection_rate in mv_revenue_cycle, sliced by payer type or facility."
+    related: [mv_revenue_cycle, fact_billing]

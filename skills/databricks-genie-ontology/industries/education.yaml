@@ -1,0 +1,136 @@
+# Education - enrollment, academic performance, tuition collections.
+# Synthetic data only. Real student records fall under FERPA/GDPR: never load them into a demo.
+spec_version: 1
+industry: education
+title: Higher Education
+description: "Course enrollment, academic outcomes and tuition collections"
+catalog: genie_ontology_education
+schema: education_demo
+seed: 101
+history_days: 730
+domains: [Academics, Student Success, Finance]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_student:
+    kind: dimension
+    rows: 400
+    comment: "Student dimension (synthetic). No protected attributes are modeled."
+    domains: [Student Success]
+    columns:
+      student_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the student"}
+      student_name: {type: string, gen: template, template: "Student {i:04d}", pii: true, comment: "Student display name (synthetic)"}
+      program: {type: string, gen: choice, values: [Engineering, Business, Arts, Science, Health], weights: [3, 3, 1, 2, 2], comment: "Degree program"}
+      cohort_year: {type: int, gen: uniform, min: 2021, max: 2026, comment: "Year the student entered"}
+      scholarship: {type: boolean, gen: bool, p: 0.3, comment: "True if the student holds a scholarship"}
+  dim_course:
+    kind: dimension
+    rows: 40
+    comment: "Courses."
+    domains: [Academics]
+    columns:
+      course_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the course"}
+      course_code: {type: string, gen: template, template: "CRS-{i:03d}", comment: "Course code"}
+      department: {type: string, gen: choice, values: [Engineering, Business, Arts, Science, Health], comment: "Owning department"}
+      level: {type: string, gen: choice, values: [Introductory, Intermediate, Advanced], weights: [4, 4, 2], comment: "Course level"}
+      credits: {type: int, gen: uniform, min: 2, max: 5, comment: "Credit hours"}
+  fact_enrollment:
+    kind: fact
+    rows: 7000
+    comment: "Course enrollments and outcomes. Grain: one student x course enrollment."
+    domains: [Academics, Student Success]
+    cluster_by: [date_key, course_key]
+    columns:
+      enrollment_id: {type: bigint, gen: seq, pk: true, comment: "Enrollment identifier"}
+      date_key: {type: int, gen: date_key, comment: "Enrollment date"}
+      student_key: {type: int, gen: fk, fk: dim_student.student_key, comment: "Student"}
+      course_key: {type: int, gen: fk, fk: dim_course.course_key, comment: "Course"}
+      grade_raw: {type: double, gen: beta, a: 5, b: 2, min: 0, max: 4, hidden: true}
+      grade_points: {type: "decimal(3,2)", gen: derived, expr: "grade_raw * (1 - dropped)", check: ">= 0", comment: "Grade points on a 0-4 scale; 0 when the course was dropped (excluded from GPA and pass rate)"}
+      dropped: {type: boolean, gen: bool, p: 0.07, comment: "True if the student dropped the course"}
+  fact_tuition:
+    kind: fact
+    rows: 3000
+    comment: "Tuition invoices and payments. Grain: one invoice."
+    domains: [Finance]
+    columns:
+      invoice_id: {type: bigint, gen: seq, pk: true, comment: "Invoice identifier"}
+      date_key: {type: int, gen: date_key, comment: "Invoice date"}
+      student_key: {type: int, gen: fk, fk: dim_student.student_key, comment: "Student invoiced"}
+      invoiced_amount: {type: "decimal(10,2)", gen: uniform, min: 800, max: 9000, check: "> 0", comment: "Amount invoiced in USD"}
+      paid_frac: {type: double, gen: uniform, min: 0.4, max: 1.0, hidden: true}
+      paid_amount: {type: "decimal(10,2)", gen: derived, expr: "invoiced_amount * paid_frac", check: ">= 0", comment: "Amount paid to date in USD"}
+
+metric_views:
+  mv_academic_performance:
+    source: fact_enrollment
+    comment: "Certified academic outcome metrics. GPA is the simple mean of grade points over completed enrollments in the slice; dropped courses are counted separately."
+    domains: [Academics, Student Success]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: student, table: dim_student, on: "source.student_key = student.student_key"}
+      - {name: course, table: dim_course, on: "source.course_key = course.course_key"}
+    dimensions:
+      - {name: enrollment_date, expr: date.calendar_date, display_name: "Enrollment Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: department, expr: course.department, display_name: "Department", synonyms: [school, faculty]}
+      - {name: course_level, expr: course.level, display_name: "Course Level", synonyms: [level]}
+      - {name: program, expr: student.program, display_name: "Program", synonyms: [degree program, major]}
+      - {name: cohort_year, expr: student.cohort_year, display_name: "Cohort Year", synonyms: [intake year, batch]}
+      - {name: scholarship, expr: student.scholarship, display_name: "Scholarship Holder", synonyms: [scholar]}
+    measures:
+      - {name: enrollments, expr: "COUNT(DISTINCT source.enrollment_id)", display_name: "Enrollments", format: integer, synonyms: [course enrollments, seats filled]}
+      - {name: unique_students, expr: "COUNT(DISTINCT source.student_key)", display_name: "Unique Students", format: integer, synonyms: [students, headcount]}
+      - {name: avg_gpa, expr: "AVG(CASE WHEN source.dropped THEN NULL ELSE source.grade_points END)", display_name: "Average GPA", format: decimal, synonyms: [GPA, grade point average]}
+      - {name: drop_rate, expr: "AVG(CASE WHEN source.dropped THEN 1.0 ELSE 0.0 END)", display_name: "Course Drop Rate", format: rate, synonyms: [withdrawal rate, attrition]}
+      - {name: pass_rate, expr: "AVG(CASE WHEN source.dropped THEN NULL WHEN source.grade_points >= 2.0 THEN 1.0 ELSE 0.0 END)", display_name: "Pass Rate", format: rate, comment: "Share of completed enrollments with grade points of at least 2.0", synonyms: [success rate]}
+  mv_tuition_collections:
+    source: fact_tuition
+    comment: "Certified tuition invoicing and collection metrics."
+    domains: [Finance]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: student, table: dim_student, on: "source.student_key = student.student_key"}
+    dimensions:
+      - {name: invoice_date, expr: date.calendar_date, display_name: "Invoice Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: program, expr: student.program, display_name: "Program", synonyms: [degree program, major]}
+      - {name: scholarship, expr: student.scholarship, display_name: "Scholarship Holder", synonyms: [scholar]}
+    measures:
+      - {name: invoiced_amount, expr: "SUM(source.invoiced_amount)", display_name: "Invoiced Amount", format: currency, synonyms: [billed tuition, receivables raised]}
+      - {name: paid_amount, expr: "SUM(source.paid_amount)", display_name: "Paid Amount", format: currency, synonyms: [collected tuition, collections]}
+      - {name: outstanding_amount, expr: "SUM(source.invoiced_amount) - SUM(source.paid_amount)", display_name: "Outstanding Amount", format: currency, synonyms: [dues, receivables, unpaid tuition]}
+      - {name: collection_rate, expr: "SUM(source.paid_amount) / SUM(source.invoiced_amount)", display_name: "Collection Rate", format: rate, synonyms: [collection efficiency]}
+
+agent:
+  name: Education Analytics Genie
+  domain: Academics
+  description: "Answers questions on enrollment, academic outcomes and tuition collections (synthetic data)."
+  sources: [mv_academic_performance, mv_tuition_collections]
+  instructions_intro: "You are a higher-education analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "Never show student names. Aggregate to program, department or cohort and suppress groups with fewer than 11 students."
+    - "Do not use scholarship status to rank or judge individuals: report it as a group comparison only."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is the average GPA by department?"
+    - "Which programs have the highest course drop rate?"
+    - "What is the tuition collection rate by program?"
+    - "How does pass rate differ between introductory and advanced courses?"
+
+pages:
+  - name: Pass Rate
+    domain: Academics
+    synonyms: [success rate]
+    description: "Share of completed enrollments with grade points of at least 2.0."
+    definition: "Pass Rate = completed enrollments with grade_points >= 2.0 divided by completed enrollments. Dropped courses are excluded."
+    business_use: "Use pass_rate in mv_academic_performance by department or course level."
+    related: [mv_academic_performance, fact_enrollment, Education Analytics Genie]
+  - name: Tuition Collection Rate
+    domain: Finance
+    synonyms: [collection efficiency]
+    description: "Tuition paid divided by tuition invoiced."
+    definition: "Collection Rate = SUM(paid_amount) / SUM(invoiced_amount) on fact_tuition."
+    business_use: "Use collection_rate in mv_tuition_collections, sliced by program."
+    related: [mv_tuition_collections, fact_tuition]

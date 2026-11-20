@@ -1,0 +1,188 @@
+# HLS - pharma and life sciences: clinical development (enrollment, safety) and commercial (Rx sales).
+# Synthetic data only.
+spec_version: 1
+industry: hls_pharma_lifesciences
+title: Pharma and Life Sciences
+description: "Clinical trial enrollment, safety signals and prescription sales"
+catalog: genie_ontology_pharma
+schema: pharma_demo
+seed: 51
+history_days: 730
+domains: [Clinical Development, Safety, Commercial]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_trial:
+    kind: dimension
+    rows: 12
+    comment: "Clinical trials."
+    domains: [Clinical Development]
+    columns:
+      trial_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the trial"}
+      trial_code: {type: string, gen: template, template: "TRL-{i:03d}", comment: "Trial protocol code"}
+      phase: {type: string, gen: choice, values: [Phase I, Phase II, Phase III, Phase IV], weights: [2, 4, 4, 2], comment: "Trial phase"}
+      therapeutic_area: {type: string, gen: choice, values: [Oncology, Cardiology, Neurology, Immunology, Endocrinology], comment: "Therapeutic area"}
+  dim_site:
+    kind: dimension
+    rows: 30
+    comment: "Investigator sites."
+    domains: [Clinical Development]
+    columns:
+      site_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the site"}
+      site_name: {type: string, gen: template, template: "Site {i:03d}", comment: "Site display name"}
+      country: {type: string, gen: choice, values: [United States, Germany, India, Brazil, Japan, United Kingdom], comment: "Country of the site"}
+  dim_product:
+    kind: dimension
+    rows: 10
+    comment: "Marketed drug products."
+    domains: [Commercial]
+    columns:
+      product_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the product"}
+      brand_name: {type: string, gen: template, template: "Brand {i:02d}", comment: "Brand name (synthetic)"}
+      therapeutic_area: {type: string, gen: choice, values: [Oncology, Cardiology, Neurology, Immunology, Endocrinology], comment: "Therapeutic area"}
+      unit_price: {type: "decimal(10,2)", gen: uniform, min: 20, max: 900, comment: "Net price per unit in USD"}
+  dim_hcp:
+    kind: dimension
+    rows: 120
+    comment: "Healthcare professionals (prescribers)."
+    domains: [Commercial]
+    columns:
+      hcp_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the prescriber"}
+      hcp_name: {type: string, gen: template, template: "HCP {i:04d}", pii: true, comment: "Prescriber display name (synthetic)"}
+      specialty: {type: string, gen: choice, values: [Oncologist, Cardiologist, Neurologist, Rheumatologist, Endocrinologist, General Practitioner], comment: "Prescriber specialty"}
+      territory: {type: string, gen: choice, values: [North, South, East, West], comment: "Sales territory"}
+  fact_enrollment:
+    kind: fact
+    rows: 1500
+    comment: "Enrollment by trial, site and month. Grain: one trial x site x reporting day."
+    domains: [Clinical Development]
+    columns:
+      enrollment_id: {type: bigint, gen: seq, pk: true, comment: "Enrollment record identifier"}
+      date_key: {type: int, gen: date_key, comment: "Reporting date"}
+      trial_key: {type: int, gen: fk, fk: dim_trial.trial_key, comment: "Trial"}
+      site_key: {type: int, gen: fk, fk: dim_site.site_key, comment: "Site"}
+      subjects_enrolled: {type: int, gen: poisson, lam: 4, min: 1, check: "> 0", comment: "Subjects enrolled in the period"}
+      screen_failures: {type: int, gen: poisson, lam: 1, check: ">= 0", comment: "Subjects who failed screening"}
+      dropouts: {type: int, gen: poisson, lam: 0.5, check: ">= 0", comment: "Subjects who dropped out"}
+  fact_adverse_events:
+    kind: fact
+    rows: 1200
+    comment: "Reported adverse events. Grain: one adverse event."
+    domains: [Safety]
+    columns:
+      ae_id: {type: bigint, gen: seq, pk: true, comment: "Adverse event identifier"}
+      date_key: {type: int, gen: date_key, comment: "Event report date"}
+      trial_key: {type: int, gen: fk, fk: dim_trial.trial_key, comment: "Trial"}
+      site_key: {type: int, gen: fk, fk: dim_site.site_key, comment: "Site"}
+      severity: {type: string, gen: choice, values: [Mild, Moderate, Severe], weights: [6, 3, 1], comment: "Severity grade"}
+      serious: {type: boolean, gen: bool, p: 0.08, comment: "True if classified as a serious adverse event"}
+      related_to_drug: {type: boolean, gen: bool, p: 0.35, comment: "True if assessed as related to the study drug"}
+  fact_rx_sales:
+    kind: fact
+    rows: 5000
+    comment: "Prescription sales. Grain: one product x prescriber x day."
+    domains: [Commercial]
+    cluster_by: [date_key, product_key]
+    columns:
+      rx_id: {type: bigint, gen: seq, pk: true, comment: "Prescription sales line identifier"}
+      date_key: {type: int, gen: date_key, comment: "Dispense date"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, comment: "Product"}
+      hcp_key: {type: int, gen: fk, fk: dim_hcp.hcp_key, skew: 0.8, comment: "Prescriber"}
+      units: {type: int, gen: uniform, min: 1, max: 40, check: "> 0", comment: "Units dispensed"}
+      price_ref: {type: "decimal(10,2)", gen: lookup, via: product_key, column: unit_price, hidden: true}
+      net_sales: {type: "decimal(12,2)", gen: derived, expr: "units * price_ref", check: ">= 0", comment: "Net sales in USD"}
+
+metric_views:
+  mv_trial_enrollment:
+    source: fact_enrollment
+    comment: "Certified enrollment metrics. Screen failure rate = screen failures divided by (enrolled + screen failures)."
+    domains: [Clinical Development]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: trial, table: dim_trial, on: "source.trial_key = trial.trial_key"}
+      - {name: site, table: dim_site, on: "source.site_key = site.site_key"}
+    dimensions:
+      - {name: reporting_date, expr: date.calendar_date, display_name: "Reporting Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: phase, expr: trial.phase, display_name: "Trial Phase", synonyms: [phase]}
+      - {name: therapeutic_area, expr: trial.therapeutic_area, display_name: "Therapeutic Area", synonyms: [TA, indication area]}
+      - {name: trial_code, expr: trial.trial_code, display_name: "Trial", synonyms: [protocol, study]}
+      - {name: country, expr: site.country, display_name: "Country", synonyms: [site country]}
+    measures:
+      - {name: subjects_enrolled, expr: "SUM(source.subjects_enrolled)", display_name: "Subjects Enrolled", format: integer, synonyms: [enrollment, patients enrolled]}
+      - {name: screen_failures, expr: "SUM(source.screen_failures)", display_name: "Screen Failures", format: integer, synonyms: [screen fails]}
+      - {name: dropouts, expr: "SUM(source.dropouts)", display_name: "Dropouts", format: integer, synonyms: [discontinuations, attrition]}
+      - {name: screen_failure_rate, expr: "SUM(source.screen_failures) / (SUM(source.subjects_enrolled) + SUM(source.screen_failures))", display_name: "Screen Failure Rate", format: rate, synonyms: [screen fail rate]}
+  mv_safety_signals:
+    source: fact_adverse_events
+    comment: "Certified pharmacovigilance counts from trial adverse event reports. Counts are of events, not patients."
+    domains: [Safety]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: trial, table: dim_trial, on: "source.trial_key = trial.trial_key"}
+      - {name: site, table: dim_site, on: "source.site_key = site.site_key"}
+    dimensions:
+      - {name: report_date, expr: date.calendar_date, display_name: "Report Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: severity, expr: source.severity, display_name: "Severity", synonyms: [grade]}
+      - {name: therapeutic_area, expr: trial.therapeutic_area, display_name: "Therapeutic Area", synonyms: [TA]}
+      - {name: phase, expr: trial.phase, display_name: "Trial Phase", synonyms: [phase]}
+      - {name: country, expr: site.country, display_name: "Country", synonyms: [site country]}
+    measures:
+      - {name: ae_count, expr: "COUNT(DISTINCT source.ae_id)", display_name: "Adverse Event Count", format: integer, synonyms: [AEs, adverse events]}
+      - {name: sae_count, expr: "SUM(CASE WHEN source.serious THEN 1 ELSE 0 END)", display_name: "Serious AE Count", format: integer, synonyms: [SAEs, serious adverse events]}
+      - {name: related_ae_count, expr: "SUM(CASE WHEN source.related_to_drug THEN 1 ELSE 0 END)", display_name: "Drug-Related AE Count", format: integer, synonyms: [related AEs, ADRs]}
+      - {name: serious_ae_share, expr: "SUM(CASE WHEN source.serious THEN 1.0 ELSE 0.0 END) / COUNT(DISTINCT source.ae_id)", display_name: "Serious AE Share", format: rate, synonyms: [SAE share]}
+  mv_commercial_performance:
+    source: fact_rx_sales
+    comment: "Certified prescription sales metrics."
+    domains: [Commercial]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+      - {name: hcp, table: dim_hcp, on: "source.hcp_key = hcp.hcp_key"}
+    dimensions:
+      - {name: dispense_date, expr: date.calendar_date, display_name: "Dispense Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: brand_name, expr: product.brand_name, display_name: "Brand", synonyms: [product]}
+      - {name: therapeutic_area, expr: product.therapeutic_area, display_name: "Therapeutic Area", synonyms: [TA]}
+      - {name: specialty, expr: hcp.specialty, display_name: "Prescriber Specialty", synonyms: [HCP specialty]}
+      - {name: territory, expr: hcp.territory, display_name: "Territory", synonyms: [sales territory]}
+    measures:
+      - {name: net_sales, expr: "SUM(source.net_sales)", display_name: "Net Sales", format: currency, synonyms: [revenue, sales]}
+      - {name: units_dispensed, expr: "SUM(source.units)", display_name: "Units Dispensed", format: integer, synonyms: [volume, TRx units]}
+      - {name: active_prescribers, expr: "COUNT(DISTINCT source.hcp_key)", display_name: "Active Prescribers", format: integer, synonyms: [writers, prescribers]}
+
+agent:
+  name: Pharma Analytics Genie
+  domain: Commercial
+  description: "Answers questions on trial enrollment, safety signals and commercial sales (synthetic data)."
+  sources: [mv_trial_enrollment, mv_safety_signals, mv_commercial_performance]
+  instructions_intro: "You are a pharma and life sciences analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "Never show prescriber names. Aggregate to specialty or territory."
+    - "Safety counts are event counts, not patient counts: say so. Do not infer causality from counts."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "How many subjects were enrolled by therapeutic area this year?"
+    - "What is the serious adverse event share by trial phase?"
+    - "Which brand has the highest net sales by territory?"
+    - "Which countries have the highest screen failure rate?"
+
+pages:
+  - name: Screen Failure Rate
+    domain: Clinical Development
+    synonyms: [screen fail rate]
+    description: "Share of screened subjects who did not enroll."
+    definition: "Screen Failure Rate = screen failures divided by (subjects enrolled + screen failures)."
+    business_use: "Use screen_failure_rate in mv_trial_enrollment by trial, phase or country."
+    related: [mv_trial_enrollment, fact_enrollment, Pharma Analytics Genie]
+  - name: Serious Adverse Event Share
+    domain: Safety
+    synonyms: [SAE share]
+    description: "Share of reported adverse events classified as serious."
+    definition: "Serious AE Share = serious adverse events divided by all adverse events, by event count."
+    business_use: "Use serious_ae_share in mv_safety_signals. It is a signal-screening view, not a causality assessment."
+    related: [mv_safety_signals, fact_adverse_events]

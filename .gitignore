@@ -1,0 +1,13 @@
+# Local state and secrets: never commit. Anchored with a leading slash so templates/STATE.md is NOT ignored.
+/STATE.md
+/config.env
+/.env
+*.local
+/out/
+*.cell.py
+# Python / tooling
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store

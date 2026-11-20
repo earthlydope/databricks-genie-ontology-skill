@@ -1,0 +1,162 @@
+# Telecom and media - subscriber revenue, network quality, churn (churn rate is a cross-fact Page).
+spec_version: 1
+industry: telecom
+title: Telecom Operator
+description: "Subscriber usage and revenue, network quality and churn"
+catalog: genie_ontology_telecom
+schema: telecom_demo
+seed: 71
+history_days: 730
+domains: [Revenue, Network, Customer]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_subscriber:
+    kind: dimension
+    rows: 400
+    comment: "Subscriber dimension (synthetic)."
+    domains: [Customer]
+    columns:
+      subscriber_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the subscriber"}
+      subscriber_name: {type: string, gen: template, template: "Subscriber {i:04d}", pii: true, comment: "Subscriber display name"}
+      segment: {type: string, gen: choice, values: [Prepaid, Postpaid, Enterprise], weights: [5, 4, 1], comment: "Subscriber segment"}
+      plan_tier: {type: string, gen: choice, values: [Basic, Plus, Premium], weights: [4, 4, 2], comment: "Plan tier"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Home region"}
+      activation_date: {type: date, gen: date, start_offset_days: -2200, end_offset_days: -60, classification: internal, comment: "Line activation date"}
+      churned: {type: boolean, gen: bool, p: 0.3, comment: "True if the subscriber has disconnected (see fact_churn)"}
+      end_key_ref: {type: int, gen: date_key, hidden: true}
+      usage_cap: {type: int, gen: derived, expr: "end_key_ref * churned + 99999999 * (1 - churned)", hidden: true}
+  dim_cell_site:
+    kind: dimension
+    rows: 30
+    comment: "Cell sites (towers)."
+    domains: [Network]
+    columns:
+      cell_site_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the cell site"}
+      site_name: {type: string, gen: template, template: "Cell {i:03d}", comment: "Cell site display name"}
+      technology: {type: string, gen: choice, values: [4G, 5G, 5G Mid-band], weights: [4, 4, 2], comment: "Radio technology"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Site region"}
+  fact_usage:
+    kind: fact
+    rows: 8000
+    comment: "Sampled daily usage and billed revenue. Grain: one subscriber x day (a sample of active days, not every day). Churned subscribers have no usage after their disconnection date."
+    domains: [Revenue]
+    cluster_by: [date_key, subscriber_key]
+    columns:
+      usage_id: {type: bigint, gen: seq, pk: true, comment: "Usage record identifier"}
+      subscriber_key: {type: int, gen: fk, fk: dim_subscriber.subscriber_key, comment: "Subscriber"}
+      date_key: {type: int, gen: date_key_before, via: subscriber_key, column: usage_cap, fk: dim_date.date_key, comment: "Usage date (never after the subscriber disconnected)"}
+      data_gb: {type: "decimal(8,3)", gen: lognormal, mean: 0.2, sigma: 0.9, min: 0, max: 60, check: ">= 0", comment: "Data used in GB"}
+      voice_minutes: {type: int, gen: poisson, lam: 14, check: ">= 0", comment: "Voice minutes used"}
+      rate_ref: {type: double, gen: uniform, min: 0.5, max: 2.5, hidden: true}
+      revenue: {type: "decimal(10,2)", gen: derived, expr: "data_gb * rate_ref * 10", check: ">= 0", comment: "Billed usage revenue in USD"}
+  fact_network_quality:
+    kind: fact
+    rows: 4000
+    comment: "Cell site quality KPIs. Grain: one cell site x day."
+    domains: [Network]
+    columns:
+      kpi_id: {type: bigint, gen: seq, pk: true, comment: "KPI record identifier"}
+      date_key: {type: int, gen: date_key, comment: "KPI date"}
+      cell_site_key: {type: int, gen: fk, fk: dim_cell_site.cell_site_key, comment: "Cell site"}
+      call_attempts: {type: int, gen: uniform, min: 500, max: 6000, check: "> 0", comment: "Call attempts"}
+      drop_frac: {type: double, gen: uniform, min: 0.002, max: 0.04, hidden: true}
+      dropped_calls: {type: int, gen: derived, expr: "call_attempts * drop_frac", check: ">= 0", comment: "Dropped calls"}
+      avg_latency_ms: {type: "decimal(8,2)", gen: lognormal, mean: 3.6, sigma: 0.35, min: 8, max: 400, check: "> 0", comment: "Average latency in ms"}
+  fact_churn:
+    kind: fact
+    rows: 1000
+    comment: "Churn events. Grain: one subscriber who left (one row per churned subscriber, dated at disconnection)."
+    domains: [Customer]
+    columns:
+      churn_id: {type: bigint, gen: seq, pk: true, comment: "Churn event identifier"}
+      subscriber_key: {type: int, gen: fk, fk: dim_subscriber.subscriber_key, unique: true, where: "churned", comment: "Subscriber who churned"}
+      date_key: {type: int, gen: lookup, via: subscriber_key, column: end_key_ref, fk: dim_date.date_key, comment: "Disconnection date"}
+      reason: {type: string, gen: choice, values: [Price, Network Quality, Competitor Offer, Relocation, Service Issue], weights: [4, 3, 3, 1, 2], comment: "Stated churn reason"}
+
+metric_views:
+  mv_revenue_usage:
+    source: fact_usage
+    comment: "Certified usage and revenue metrics. ARPU = revenue divided by distinct active subscribers in the slice."
+    domains: [Revenue]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: sub, table: dim_subscriber, on: "source.subscriber_key = sub.subscriber_key"}
+    dimensions:
+      - {name: usage_date, expr: date.calendar_date, display_name: "Usage Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: segment, expr: sub.segment, display_name: "Segment", synonyms: [subscriber segment, customer type]}
+      - {name: plan_tier, expr: sub.plan_tier, display_name: "Plan Tier", synonyms: [plan]}
+      - {name: region, expr: sub.region, display_name: "Region", synonyms: [subscriber region]}
+    measures:
+      - {name: total_revenue, expr: "SUM(source.revenue)", display_name: "Usage Revenue", format: currency, synonyms: [revenue, billed revenue]}
+      - {name: active_subscribers, expr: "COUNT(DISTINCT source.subscriber_key)", display_name: "Active Subscribers", format: integer, synonyms: [subscribers, active base]}
+      - {name: arpu, expr: "SUM(source.revenue) / COUNT(DISTINCT source.subscriber_key)", display_name: "ARPU", format: currency, comment: "Average revenue per active subscriber in the slice", synonyms: [average revenue per user]}
+      - {name: data_gb, expr: "SUM(source.data_gb)", display_name: "Data Volume GB", format: decimal, synonyms: [data usage, traffic]}
+  mv_network_quality:
+    source: fact_network_quality
+    comment: "Certified network quality metrics. Drop rate = dropped calls divided by call attempts."
+    domains: [Network]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: site, table: dim_cell_site, on: "source.cell_site_key = site.cell_site_key"}
+    dimensions:
+      - {name: kpi_date, expr: date.calendar_date, display_name: "KPI Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: technology, expr: site.technology, display_name: "Technology", synonyms: [radio technology, generation]}
+      - {name: region, expr: site.region, display_name: "Region", synonyms: [site region]}
+      - {name: site_name, expr: site.site_name, display_name: "Cell Site", synonyms: [tower, site]}
+    measures:
+      - {name: call_attempts, expr: "SUM(source.call_attempts)", display_name: "Call Attempts", format: integer, synonyms: [calls]}
+      - {name: dropped_calls, expr: "SUM(source.dropped_calls)", display_name: "Dropped Calls", format: integer, synonyms: [call drops]}
+      - {name: drop_rate, expr: "SUM(source.dropped_calls) / SUM(source.call_attempts)", display_name: "Call Drop Rate", format: rate, synonyms: [dropped call rate, DCR]}
+      - {name: avg_latency_ms, expr: "AVG(source.avg_latency_ms)", display_name: "Average Latency ms", format: decimal, synonyms: [latency]}
+  mv_churn_events:
+    source: fact_churn
+    comment: "Certified churn counts. Churn rate needs the subscriber base: see the Churn Rate page."
+    domains: [Customer]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: sub, table: dim_subscriber, on: "source.subscriber_key = sub.subscriber_key"}
+    dimensions:
+      - {name: churn_date, expr: date.calendar_date, display_name: "Churn Date", synonyms: [disconnection date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: reason, expr: source.reason, display_name: "Churn Reason", synonyms: [why left]}
+      - {name: segment, expr: sub.segment, display_name: "Segment", synonyms: [subscriber segment]}
+      - {name: region, expr: sub.region, display_name: "Region", synonyms: [subscriber region]}
+    measures:
+      - {name: churned_subscribers, expr: "COUNT(DISTINCT source.subscriber_key)", display_name: "Churned Subscribers", format: integer, synonyms: [churn, disconnects]}
+
+agent:
+  name: Telecom Analytics Genie
+  domain: Revenue
+  description: "Answers questions on ARPU, network quality and churn (synthetic data)."
+  sources: [mv_revenue_usage, mv_network_quality, mv_churn_events]
+  instructions_intro: "You are a telecom analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "Churn rate is not a stored measure: divide churned_subscribers by the subscriber base for the same segment and period, and say which base you used."
+    - "Never show subscriber names. Aggregate to segment or region."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is ARPU by segment this year?"
+    - "Which technology has the highest call drop rate?"
+    - "What are the top churn reasons?"
+    - "Show monthly usage revenue and data volume."
+
+pages:
+  - name: ARPU
+    domain: Revenue
+    synonyms: [average revenue per user]
+    description: "Usage revenue per active subscriber."
+    definition: "ARPU = SUM(revenue) / COUNT(DISTINCT subscriber_key) in the selected slice and period."
+    business_use: "Use arpu in mv_revenue_usage. It is active-subscriber based; state the period."
+    related: [mv_revenue_usage, fact_usage, Telecom Analytics Genie]
+  - name: Churn Rate
+    domain: Customer
+    synonyms: [attrition rate]
+    description: "Subscribers who left divided by the subscriber base."
+    definition: "Churn Rate = churned_subscribers (mv_churn_events) / subscriber base for the same segment and period. It spans two sources, so it is not a stored measure."
+    business_use: "Use churned_subscribers for the numerator and the subscriber count of dim_subscriber (or active_subscribers) for the base, and state which."
+    related: [mv_churn_events, mv_revenue_usage, dim_subscriber]

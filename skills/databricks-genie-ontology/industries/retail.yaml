@@ -1,0 +1,202 @@
+# Omnichannel Retail - sales, returns, inventory. A conventional retail star schema (sales / returns / inventory facts over
+# date, product, customer, store). Independently written; the community "Northwind Retail" Genie Ontology demo
+# (databeli/genie_ontology) is credited as the inspiration for the overall idea in README.md.
+spec_version: 1
+industry: retail
+title: Omnichannel Retail
+description: "Star schema for retail sales, returns and inventory with conformed date, product, customer and store dimensions"
+catalog: genie_ontology_retail
+schema: retail_demo
+seed: 42
+history_days: 730
+domains: [Sales, Customer, Supply Chain, Finance]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per calendar day, shared by all fact tables."}
+  dim_product:
+    kind: dimension
+    rows: 50
+    comment: "Product dimension with cost and list price."
+    domains: [Sales]
+    columns:
+      product_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for product"}
+      sku: {type: string, gen: template, template: "SKU-{i:04d}", comment: "Stock keeping unit (business key)"}
+      category: {type: string, gen: choice, values: [Electronics, Apparel, "Home & Kitchen", Beauty, Sports], comment: "Merchandising category"}
+      product_name: {type: string, gen: map, from: category, comment: "Product display name",
+                     mapping: {Electronics: [Headphones, Smart Speaker, Tablet, Charger], Apparel: [Jacket, Sneakers, T-Shirt, Jeans],
+                               "Home & Kitchen": [Blender, Cookware Set, Vacuum, Lamp], Beauty: [Moisturizer, Perfume, Shampoo, Lipstick],
+                               Sports: [Yoga Mat, Dumbbells, Running Belt, Water Bottle]}}
+      brand: {type: string, gen: choice, values: [Aurora, Nimbus, Vertex, Solace, Kestrel], comment: "Brand name"}
+      unit_cost: {type: "decimal(10,2)", gen: uniform, min: 4, max: 320, comment: "Wholesale unit cost in USD"}
+      markup: {type: double, gen: uniform, min: 1.3, max: 2.2, hidden: true}
+      list_price: {type: "decimal(10,2)", gen: derived, expr: "unit_cost * markup", comment: "List price in USD"}
+  dim_customer:
+    kind: dimension
+    rows: 200
+    comment: "Customer dimension (one row per customer; the customer's home region and segment)."
+    domains: [Customer]
+    columns:
+      customer_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for customer"}
+      customer_name: {type: string, gen: template, template: "Customer {i:04d}", pii: true, comment: "Customer display name"}
+      segment: {type: string, gen: choice, values: [Consumer, Small Business, Enterprise], weights: [6, 3, 1], comment: "Customer segment"}
+      region: {type: string, gen: choice, values: [North America, Europe, APAC, LATAM], weights: [4, 3, 3, 1], comment: "Sales region of the customer"}
+      signup_date: {type: date, gen: date, start_offset_days: -1500, end_offset_days: -30, classification: internal, comment: "Date the customer registered"}
+  dim_store:
+    kind: dimension
+    rows: 10
+    comment: "Store and sales channel dimension."
+    domains: [Sales, Supply Chain]
+    columns:
+      store_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for store"}
+      store_name: {type: string, gen: template, template: "Store {i:02d}", comment: "Store display name"}
+      region: {type: string, gen: choice, values: [North America, Europe, APAC, LATAM], comment: "Store region"}
+      channel: {type: string, gen: choice, values: [Online, In-Store], weights: [4, 6], comment: "Sales channel"}
+  fact_sales:
+    kind: fact
+    rows: 5000
+    comment: "Order-line sales. Grain: one order line (a customer, a product, a store, a day)."
+    domains: [Sales, Finance]
+    cluster_by: [date_key, product_key]
+    checks: {revenue_matches: "revenue = quantity * unit_price"}
+    columns:
+      order_id: {type: bigint, gen: seq, start: 100000, pk: true, comment: "Order line identifier"}
+      date_key: {type: int, gen: date_key, comment: "Order date (dim_date.date_key)"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, skew: 0.7, comment: "Product sold"}
+      customer_key: {type: int, gen: fk, fk: dim_customer.customer_key, comment: "Customer who bought"}
+      store_key: {type: int, gen: fk, fk: dim_store.store_key, comment: "Store or channel of sale"}
+      quantity: {type: int, gen: uniform, min: 1, max: 6, check: "> 0", comment: "Units sold"}
+      list_price_ref: {type: "decimal(10,2)", gen: lookup, via: product_key, column: list_price, hidden: true}
+      discount: {type: double, gen: uniform, min: 0.85, max: 1.0, hidden: true}
+      unit_price: {type: "decimal(10,2)", gen: derived, expr: "list_price_ref * discount", check: ">= 0", comment: "Price per unit after discount, USD"}
+      revenue: {type: "decimal(12,2)", gen: derived, expr: "quantity * unit_price", comment: "Line revenue = quantity x discounted unit_price, USD"}
+  fact_returns:
+    kind: fact
+    rows: 400
+    comment: "Returned order lines. Grain: one return (always tied to one earlier order line)."
+    domains: [Customer]
+    cluster_by: [date_key, product_key]
+    columns:
+      return_id: {type: bigint, gen: seq, start: 500000, pk: true, comment: "Return identifier"}
+      order_id: {type: bigint, gen: fk, fk: fact_sales.order_id, unique: true, comment: "Order line being returned"}
+      date_key: {type: int, gen: date_key_after, via: order_id, column: date_key, max_days: 45, comment: "Return date (on or after the sale)"}
+      product_key: {type: int, gen: lookup, via: order_id, column: product_key, fk: dim_product.product_key, comment: "Product returned"}
+      customer_key: {type: int, gen: lookup, via: order_id, column: customer_key, fk: dim_customer.customer_key, comment: "Customer returning"}
+      quantity: {type: int, gen: lookup, via: order_id, column: quantity, check: "> 0", comment: "Units returned"}
+      sale_revenue: {type: "decimal(12,2)", gen: lookup, via: order_id, column: revenue, hidden: true}
+      refund_ratio: {type: double, gen: uniform, min: 0.5, max: 1.0, hidden: true}
+      return_amount: {type: "decimal(12,2)", gen: derived, expr: "sale_revenue * refund_ratio", check: ">= 0", comment: "Refunded amount in USD (never above the order revenue)"}
+      return_reason: {type: string, gen: choice, values: [Defective, Wrong Item, Changed Mind, Arrived Late, Not As Described], comment: "Reason code"}
+  fact_inventory:
+    kind: fact
+    rows: 3000
+    comment: "Stock levels sampled per product and store. Grain: one product x store x snapshot day."
+    domains: [Supply Chain]
+    cluster_by: [snapshot_date_key, product_key]
+    columns:
+      inventory_id: {type: bigint, gen: seq, pk: true, comment: "Snapshot row identifier"}
+      snapshot_date_key: {type: int, gen: date_key, comment: "Snapshot date"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, comment: "Product"}
+      store_key: {type: int, gen: fk, fk: dim_store.store_key, comment: "Store"}
+      stock_on_hand: {type: int, gen: uniform, min: 0, max: 400, check: ">= 0", comment: "Units on hand at snapshot"}
+      stock_received: {type: int, gen: uniform, min: 0, max: 200, check: ">= 0", comment: "Units received since previous snapshot"}
+
+metric_views:
+  mv_retail_sales:
+    source: fact_sales
+    comment: "Certified sales metrics. Revenue is the discounted line value, before any returns."
+    domains: [Sales, Finance]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+      - {name: customer, table: dim_customer, on: "source.customer_key = customer.customer_key"}
+      - {name: store, table: dim_store, on: "source.store_key = store.store_key"}
+    dimensions:
+      - {name: ordered_on, expr: date.calendar_date, display_name: "Ordered On", synonyms: ["sale day", "purchase day"]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: ["calendar year"]}
+      - {name: quarter, expr: date.quarter, display_name: "Quarter", synonyms: ["fiscal quarter"]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: ["calendar month"]}
+      - {name: product_category, expr: product.category, display_name: "Product Category", synonyms: ["category"]}
+      - {name: brand, expr: product.brand, display_name: "Brand Name", synonyms: ["label", "maker"]}
+      - {name: customer_segment, expr: customer.segment, display_name: "Customer Segment", synonyms: ["segment"]}
+      - {name: customer_region, expr: customer.region, display_name: "Region of Customer", synonyms: ["home region", "customer area"]}
+      - {name: store_region, expr: store.region, display_name: "Region of Store", synonyms: ["store area"]}
+      - {name: channel, expr: store.channel, display_name: "Channel", synonyms: ["online vs in-store", "route to market"]}
+    measures:
+      - {name: total_revenue, expr: "SUM(source.revenue)", display_name: "Total Revenue", format: currency,
+         comment: "Sum of line revenue (quantity x discounted unit price); returns are not deducted", synonyms: [revenue, sales, GMV, gross sales]}
+      - {name: units_sold, expr: "SUM(source.quantity)", display_name: "Units Sold", format: integer, synonyms: [volume, items sold]}
+      - {name: orders, expr: "COUNT(DISTINCT source.order_id)", display_name: "Orders", format: integer, synonyms: [order count, order volume]}
+      - {name: revenue_per_order, expr: "SUM(source.revenue) / COUNT(DISTINCT source.order_id)", display_name: "Revenue per Order", format: currency, synonyms: [AOV, average ticket, basket value]}
+  mv_retail_returns:
+    source: fact_returns
+    comment: "Certified returns metrics. Return rate needs revenue from mv_retail_sales: see the Customer Return Rate page."
+    domains: [Customer]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+      - {name: customer, table: dim_customer, on: "source.customer_key = customer.customer_key"}
+    dimensions:
+      - {name: returned_on, expr: date.calendar_date, display_name: "Returned On", synonyms: ["day returned", "refund day"]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: ["calendar year"]}
+      - {name: product_category, expr: product.category, display_name: "Product Category", synonyms: ["category"]}
+      - {name: return_reason, expr: source.return_reason, display_name: "Return Reason", synonyms: [reason, why returned]}
+      - {name: customer_segment, expr: customer.segment, display_name: "Customer Segment", synonyms: ["segment"]}
+      - {name: customer_region, expr: customer.region, display_name: "Region of Customer", synonyms: [region, home region]}
+    measures:
+      - {name: returns_logged, expr: "COUNT(DISTINCT source.return_id)", display_name: "Returns Logged", format: integer, synonyms: [returns, return count]}
+      - {name: units_returned, expr: "SUM(source.quantity)", display_name: "Units Sent Back", format: integer, synonyms: [return volume, items returned]}
+      - {name: return_amount, expr: "SUM(source.return_amount)", display_name: "Refunded Amount", format: currency, synonyms: [refunds, return amount, money back]}
+  mv_retail_inventory:
+    source: fact_inventory
+    comment: "Certified stock metrics from periodic snapshots."
+    domains: [Supply Chain]
+    joins:
+      - {name: date, table: dim_date, on: "source.snapshot_date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+      - {name: store, table: dim_store, on: "source.store_key = store.store_key"}
+    dimensions:
+      - {name: as_of_day, expr: date.calendar_date, display_name: "As-of Day", synonyms: ["stock date", "count date"]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: ["calendar month"]}
+      - {name: product_category, expr: product.category, display_name: "Product Category", synonyms: ["category"]}
+      - {name: store_region, expr: store.region, display_name: "Store Region", synonyms: [region]}
+    measures:
+      - {name: mean_stock_units, expr: "AVG(source.stock_on_hand)", display_name: "Mean Stock (units)", format: integer, synonyms: [typical stock level, average inventory]}
+      - {name: units_replenished, expr: "SUM(source.stock_received)", display_name: "Units Replenished", format: integer, synonyms: [restock volume, replenishment]}
+      - {name: thin_stock_snapshots, expr: "SUM(CASE WHEN source.stock_on_hand < 50 THEN 1 ELSE 0 END)", display_name: "Thin-Stock Snapshots",
+         format: integer, comment: "Snapshots where fewer than 50 units were on hand", synonyms: [stockout risk snapshots]}
+
+agent:
+  name: Omnichannel Retail Genie
+  domain: Sales
+  description: "Answers questions about retail sales, returns and stock from certified metric views."
+  sources: [mv_retail_sales, mv_retail_returns, mv_retail_inventory]
+  instructions_intro: "You are a retail analytics assistant. All data is synthetic."
+  instructions:
+    - "Answer from the certified metric views; use raw tables only when no metric view covers the question."
+    - "Revenue and sales both mean total_revenue in mv_retail_sales."
+    - "Return rate is not stored. Divide return_amount (mv_retail_returns) by total_revenue (mv_retail_sales) for the same period and slice, and say you derived it."
+    - "Returns carry no store. When revenue and returns are compared by region, use customer_region in both views."
+    - "Never output customer names; aggregate to segment, region or category."
+    - "Amounts are USD. If no period is given, use the trailing 12 months and state it."
+  questions:
+    - "Which product categories brought in the most revenue last quarter?"
+    - "How did the share of revenue that gets refunded change between last year and this year?"
+    - "Which customer region combines strong revenue with heavy returns?"
+    - "How does average order value differ across customer segments?"
+    - "Which categories carry the thinnest stock on average?"
+
+pages:
+  - name: Total Revenue
+    domain: Finance
+    synonyms: [revenue, sales, gross sales, GMV]
+    description: "Value of order lines at the price actually charged (after line discounts), before any refunds."
+    definition: "Total Revenue = SUM(fact_sales.revenue), where revenue is quantity x the discounted unit price. Refunds are not deducted."
+    business_use: "Use total_revenue in mv_retail_sales instead of summing fact_sales by hand. For revenue net of refunds, subtract return_amount from mv_retail_returns for the same slice."
+    related: [mv_retail_sales, fact_sales, Omnichannel Retail Genie]
+  - name: Customer Return Rate
+    domain: Customer
+    synonyms: [return rate, returns ratio, refund rate]
+    description: "Refunded value as a share of revenue, for the same period and slice."
+    definition: "Customer Return Rate = SUM(fact_returns.return_amount) / SUM(fact_sales.revenue) over the same period and dimension slice. Two fact tables are involved, so no single measure holds it."
+    business_use: "Take return_amount from mv_retail_returns and total_revenue from mv_retail_sales and divide. This page is the agreed formula."
+    related: [mv_retail_returns, mv_retail_sales, fact_returns, Omnichannel Retail Genie]

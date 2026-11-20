@@ -1,0 +1,141 @@
+# BFSI - general insurance: premiums, claims, loss ratio (a cross-fact metric that belongs on a Page).
+spec_version: 1
+industry: bfsi_insurance
+title: General Insurance
+description: "Policies, premiums and claims across motor, health and home"
+catalog: genie_ontology_insurance
+schema: insurance_demo
+seed: 31
+history_days: 730
+domains: [Underwriting, Claims, Customer, Finance]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_policyholder:
+    kind: dimension
+    rows: 300
+    comment: "Policyholder dimension (synthetic)."
+    domains: [Customer]
+    columns:
+      policyholder_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the policyholder"}
+      policyholder_name: {type: string, gen: template, template: "Policyholder {i:04d}", pii: true, comment: "Policyholder display name"}
+      age_band: {type: string, gen: choice, values: [18-25, 26-35, 36-50, 51-65, 66+], weights: [1, 3, 4, 3, 1], comment: "Age band"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Home region"}
+      segment: {type: string, gen: choice, values: [Individual, Family, SME], weights: [5, 4, 1], comment: "Customer segment"}
+  dim_product:
+    kind: dimension
+    rows: 8
+    comment: "Insurance products."
+    domains: [Underwriting]
+    columns:
+      product_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the product"}
+      line_of_business: {type: string, gen: choice, values: [Motor, Health, Home, Travel], comment: "Line of business"}
+      product_name: {type: string, gen: template, template: "Plan {i:02d}", comment: "Product plan name"}
+      coverage_tier: {type: string, gen: choice, values: [Basic, Standard, Premium], comment: "Coverage tier"}
+  fact_policies:
+    kind: fact
+    rows: 2500
+    comment: "Policies written. Grain: one policy."
+    domains: [Underwriting, Finance]
+    cluster_by: [date_key, product_key]
+    columns:
+      policy_id: {type: bigint, gen: seq, start: 700000, pk: true, comment: "Policy identifier"}
+      date_key: {type: int, gen: date_key, comment: "Policy start date"}
+      policyholder_key: {type: int, gen: fk, fk: dim_policyholder.policyholder_key, comment: "Policyholder"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, comment: "Product sold"}
+      channel: {type: string, gen: choice, values: [Agent, Broker, Direct Digital, Bancassurance], weights: [3, 2, 3, 2], comment: "Distribution channel"}
+      sum_insured: {type: "decimal(14,2)", gen: lognormal, mean: 10.5, sigma: 0.7, min: 5000, max: 2000000, check: "> 0", comment: "Sum insured in USD"}
+      rate_ref: {type: double, gen: uniform, min: 0.006, max: 0.03, hidden: true}
+      written_premium: {type: "decimal(12,2)", gen: derived, expr: "sum_insured * rate_ref", check: "> 0", comment: "Annual written premium in USD"}
+  fact_claims:
+    kind: fact
+    rows: 700
+    comment: "Claims. Grain: one claim. A policy can have several claims."
+    domains: [Claims]
+    cluster_by: [date_key]
+    columns:
+      claim_id: {type: bigint, gen: seq, start: 900000, pk: true, comment: "Claim identifier"}
+      policy_id: {type: bigint, gen: fk, fk: fact_policies.policy_id, comment: "Policy claimed against"}
+      product_key: {type: int, gen: lookup, via: policy_id, column: product_key, fk: dim_product.product_key, comment: "Product of the policy (denormalized)"}
+      date_key: {type: int, gen: date_key_after, via: policy_id, column: date_key, max_days: 300, comment: "Claim date (on or after policy start)"}
+      cause: {type: string, gen: choice, values: [Accident, Theft, Illness, Fire, Water Damage, Natural Disaster], comment: "Cause of loss"}
+      status: {type: string, gen: choice, values: [Settled, Open, Rejected], weights: [6, 2, 2], comment: "Claim status"}
+      insured_ref: {type: "decimal(14,2)", gen: lookup, via: policy_id, column: sum_insured, hidden: true}
+      loss_frac: {type: double, gen: uniform, min: 0.005, max: 0.25, hidden: true}
+      claimed_amount: {type: "decimal(12,2)", gen: derived, expr: "insured_ref * loss_frac", check: "> 0", comment: "Claimed amount in USD"}
+      pay_frac: {type: double, gen: uniform, min: 0.5, max: 1.0, hidden: true}
+      paid_amount: {type: "decimal(12,2)", gen: derived, expr: "claimed_amount * pay_frac * (status == 'Settled')", check: ">= 0", comment: "Amount paid in USD: a share of the claim for Settled claims, 0 while Open or Rejected"}
+
+metric_views:
+  mv_premium_performance:
+    source: fact_policies
+    comment: "Certified premium and policy metrics. Premium is annual written premium booked at policy start."
+    domains: [Underwriting, Finance]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+      - {name: holder, table: dim_policyholder, on: "source.policyholder_key = holder.policyholder_key"}
+    dimensions:
+      - {name: start_date, expr: date.calendar_date, display_name: "Policy Start Date", synonyms: [inception date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: quarter, expr: date.quarter, display_name: "Quarter", synonyms: [fiscal quarter]}
+      - {name: line_of_business, expr: product.line_of_business, display_name: "Line of Business", synonyms: [LOB, product line]}
+      - {name: channel, expr: source.channel, display_name: "Distribution Channel", synonyms: [channel]}
+      - {name: region, expr: holder.region, display_name: "Region", synonyms: [policyholder region]}
+      - {name: segment, expr: holder.segment, display_name: "Customer Segment", synonyms: [segment]}
+    measures:
+      - {name: written_premium, expr: "SUM(source.written_premium)", display_name: "Written Premium", format: currency, synonyms: [GWP, premium, gross written premium]}
+      - {name: policy_count, expr: "COUNT(DISTINCT source.policy_id)", display_name: "Policy Count", format: integer, synonyms: [policies, policies written]}
+      - {name: avg_premium, expr: "SUM(source.written_premium) / COUNT(DISTINCT source.policy_id)", display_name: "Average Premium", format: currency, synonyms: [average ticket]}
+      - {name: total_sum_insured, expr: "SUM(source.sum_insured)", display_name: "Total Sum Insured", format: currency, synonyms: [exposure, TSI]}
+  mv_claims_performance:
+    source: fact_claims
+    comment: "Certified claims metrics. paid_amount counts settled claims only. Loss ratio spans two facts: see the Loss Ratio page."
+    domains: [Claims]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+    dimensions:
+      - {name: claim_date, expr: date.calendar_date, display_name: "Claim Date", synonyms: [loss reported date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: line_of_business, expr: product.line_of_business, display_name: "Line of Business", synonyms: [LOB, product line]}
+      - {name: cause, expr: source.cause, display_name: "Cause of Loss", synonyms: [peril, loss cause]}
+      - {name: status, expr: source.status, display_name: "Claim Status", synonyms: [claim state]}
+    measures:
+      - {name: claim_count, expr: "COUNT(DISTINCT source.claim_id)", display_name: "Claim Count", format: integer, synonyms: [claims, number of claims]}
+      - {name: claimed_amount, expr: "SUM(source.claimed_amount)", display_name: "Claimed Amount", format: currency, synonyms: [incurred, claims value]}
+      - {name: paid_amount, expr: "SUM(CASE WHEN source.status = 'Settled' THEN source.paid_amount ELSE 0 END)", display_name: "Paid Amount", format: currency, synonyms: [claims paid, settled amount]}
+      - {name: rejection_rate, expr: "SUM(CASE WHEN source.status = 'Rejected' THEN 1.0 ELSE 0.0 END) / COUNT(DISTINCT source.claim_id)", display_name: "Rejection Rate", format: rate, synonyms: [repudiation rate]}
+
+agent:
+  name: Insurance Analytics Genie
+  domain: Underwriting
+  description: "Answers questions on premiums, claims and loss ratio from certified metric views."
+  sources: [mv_premium_performance, mv_claims_performance]
+  instructions_intro: "You are a general insurance analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "Never output policyholder names; aggregate to line of business, region or segment."
+    - "Loss ratio is not a stored measure: compute mv_claims_performance.paid_amount / mv_premium_performance.written_premium for the same period and line of business, and say so."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is written premium by line of business this year?"
+    - "What is the loss ratio by line of business?"
+    - "Which cause of loss drives the highest paid amount?"
+    - "What is the claim rejection rate by line of business?"
+
+pages:
+  - name: Loss Ratio
+    domain: Finance
+    synonyms: [claims ratio, incurred ratio]
+    description: "Claims paid divided by premium written for the same period and line of business."
+    definition: "Loss Ratio = paid_amount (settled claims) / written_premium for the same period and line of business. It spans two facts, so it is not a stored measure."
+    business_use: "Combine paid_amount from mv_claims_performance with written_premium from mv_premium_performance. State the period and whether it is paid or incurred."
+    related: [mv_claims_performance, mv_premium_performance, Insurance Analytics Genie]
+  - name: Written Premium
+    domain: Underwriting
+    synonyms: [GWP, gross written premium]
+    description: "Annual premium booked at policy start."
+    definition: "Written Premium = SUM(written_premium) on fact_policies, booked on the policy start date."
+    business_use: "Use written_premium in mv_premium_performance. It is written, not earned."
+    related: [mv_premium_performance, fact_policies]

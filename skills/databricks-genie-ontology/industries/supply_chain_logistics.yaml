@@ -1,0 +1,151 @@
+# Supply chain and logistics - shipments (on-time, cost) and warehouse inventory positions.
+spec_version: 1
+industry: supply_chain_logistics
+title: Supply Chain and Logistics
+description: "Shipment performance, freight cost and warehouse inventory"
+catalog: genie_ontology_supply_chain
+schema: logistics_demo
+seed: 91
+history_days: 730
+domains: [Transportation, Warehousing, Procurement]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_warehouse:
+    kind: dimension
+    rows: 10
+    comment: "Warehouses and distribution centers."
+    domains: [Warehousing]
+    columns:
+      warehouse_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the warehouse"}
+      warehouse_name: {type: string, gen: template, template: "DC {i:02d}", comment: "Warehouse display name"}
+      region: {type: string, gen: choice, values: [North America, Europe, APAC, LATAM], comment: "Warehouse region"}
+      capacity_pallets: {type: int, gen: uniform, min: 2000, max: 20000, comment: "Storage capacity in pallets"}
+  dim_carrier:
+    kind: dimension
+    rows: 8
+    comment: "Transport carriers."
+    domains: [Transportation]
+    columns:
+      carrier_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the carrier"}
+      carrier_name: {type: string, gen: template, template: "Carrier {i:02d}", comment: "Carrier display name"}
+      mode: {type: string, gen: choice, values: [Road, Rail, Air, Ocean], weights: [5, 2, 1, 2], comment: "Transport mode"}
+  dim_product:
+    kind: dimension
+    rows: 40
+    comment: "Products moved through the network."
+    domains: [Procurement]
+    columns:
+      product_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the product"}
+      sku: {type: string, gen: template, template: "SCM-{i:04d}", comment: "Product SKU"}
+      category: {type: string, gen: choice, values: [Raw Materials, Components, Finished Goods, Spare Parts], comment: "Product category"}
+  fact_shipments:
+    kind: fact
+    rows: 6000
+    comment: "Shipments. Grain: one shipment."
+    domains: [Transportation]
+    cluster_by: [date_key, carrier_key]
+    columns:
+      shipment_id: {type: bigint, gen: seq, start: 200000, pk: true, comment: "Shipment identifier"}
+      date_key: {type: int, gen: date_key, comment: "Ship date"}
+      warehouse_key: {type: int, gen: fk, fk: dim_warehouse.warehouse_key, comment: "Origin warehouse"}
+      carrier_key: {type: int, gen: fk, fk: dim_carrier.carrier_key, comment: "Carrier used"}
+      weight_kg: {type: "decimal(10,2)", gen: lognormal, mean: 6.0, sigma: 0.8, min: 5, max: 20000, check: "> 0", comment: "Shipment weight in kg"}
+      cost_per_kg: {type: double, gen: uniform, min: 0.15, max: 2.4, hidden: true}
+      freight_cost: {type: "decimal(12,2)", gen: derived, expr: "weight_kg * cost_per_kg", check: ">= 0", comment: "Freight cost in USD"}
+      planned_days: {type: int, gen: uniform, min: 1, max: 12, check: "> 0", comment: "Promised transit days"}
+      is_late: {type: boolean, gen: bool, p: 0.12, hidden: true}
+      late_days: {type: int, gen: poisson, lam: 3, min: 1, hidden: true}
+      delay_days: {type: int, gen: derived, expr: "late_days * is_late", check: ">= 0", comment: "Days late (0 if on time)"}
+      actual_days: {type: int, gen: derived, expr: "planned_days + delay_days", check: "> 0", comment: "Actual transit days"}
+      on_time: {type: boolean, gen: derived, expr: "actual_days <= planned_days", comment: "True if delivered within the promised days"}
+  fact_inventory_positions:
+    kind: fact
+    rows: 4000
+    comment: "Inventory positions. Grain: one warehouse x product x snapshot."
+    domains: [Warehousing, Procurement]
+    cluster_by: [date_key, warehouse_key]
+    columns:
+      position_id: {type: bigint, gen: seq, pk: true, comment: "Position identifier"}
+      date_key: {type: int, gen: date_key, comment: "Snapshot date"}
+      warehouse_key: {type: int, gen: fk, fk: dim_warehouse.warehouse_key, comment: "Warehouse"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, comment: "Product"}
+      on_hand_units: {type: int, gen: uniform, min: 0, max: 5000, check: ">= 0", comment: "Units on hand"}
+      backorder_units: {type: int, gen: poisson, lam: 15, check: ">= 0", comment: "Units on backorder"}
+      reorder_point: {type: int, gen: uniform, min: 100, max: 1500, check: "> 0", comment: "Reorder point in units"}
+
+metric_views:
+  mv_logistics_performance:
+    source: fact_shipments
+    comment: "Certified shipment metrics. On-time rate is by shipment count."
+    domains: [Transportation]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: wh, table: dim_warehouse, on: "source.warehouse_key = wh.warehouse_key"}
+      - {name: carrier, table: dim_carrier, on: "source.carrier_key = carrier.carrier_key"}
+    dimensions:
+      - {name: ship_date, expr: date.calendar_date, display_name: "Ship Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: origin_region, expr: wh.region, display_name: "Origin Region", synonyms: [region]}
+      - {name: warehouse_name, expr: wh.warehouse_name, display_name: "Origin Warehouse", synonyms: [DC, distribution center]}
+      - {name: carrier_name, expr: carrier.carrier_name, display_name: "Carrier", synonyms: [transporter]}
+      - {name: mode, expr: carrier.mode, display_name: "Transport Mode", synonyms: [mode]}
+    measures:
+      - {name: shipment_count, expr: "COUNT(DISTINCT source.shipment_id)", display_name: "Shipment Count", format: integer, synonyms: [shipments, loads]}
+      - {name: on_time_rate, expr: "AVG(CASE WHEN source.on_time THEN 1.0 ELSE 0.0 END)", display_name: "On-Time Delivery Rate", format: rate, synonyms: [OTD, on time rate, OTIF proxy]}
+      - {name: freight_cost, expr: "SUM(source.freight_cost)", display_name: "Freight Cost", format: currency, synonyms: [transport cost, logistics cost]}
+      - {name: cost_per_kg, expr: "SUM(source.freight_cost) / SUM(source.weight_kg)", display_name: "Cost per kg", format: decimal, synonyms: [unit freight cost]}
+      - {name: avg_transit_days, expr: "AVG(source.actual_days)", display_name: "Average Transit Days", format: decimal, synonyms: [lead time, transit time]}
+  mv_inventory_positions:
+    source: fact_inventory_positions
+    comment: "Certified inventory position metrics. Sum balances over a single snapshot date for point-in-time totals."
+    domains: [Warehousing, Procurement]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: wh, table: dim_warehouse, on: "source.warehouse_key = wh.warehouse_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+    dimensions:
+      - {name: snapshot_date, expr: date.calendar_date, display_name: "Snapshot Date", synonyms: [as of date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: region, expr: wh.region, display_name: "Warehouse Region", synonyms: [region]}
+      - {name: warehouse_name, expr: wh.warehouse_name, display_name: "Warehouse", synonyms: [DC, distribution center]}
+      - {name: category, expr: product.category, display_name: "Product Category", synonyms: [category]}
+    measures:
+      - {name: on_hand_units, expr: "SUM(source.on_hand_units)", display_name: "On-Hand Units", format: integer, synonyms: [stock, inventory units]}
+      - {name: backorder_units, expr: "SUM(source.backorder_units)", display_name: "Backorder Units", format: integer, synonyms: [backorders]}
+      - {name: below_reorder_count, expr: "SUM(CASE WHEN source.on_hand_units < source.reorder_point THEN 1 ELSE 0 END)", display_name: "Positions Below Reorder Point", format: integer, synonyms: [low stock positions, replenishment needed]}
+      - {name: below_reorder_rate, expr: "AVG(CASE WHEN source.on_hand_units < source.reorder_point THEN 1.0 ELSE 0.0 END)", display_name: "Below Reorder Point Rate", format: rate, synonyms: [stockout risk rate]}
+
+agent:
+  name: Supply Chain Genie
+  domain: Transportation
+  description: "Answers questions on on-time delivery, freight cost and inventory positions (synthetic data)."
+  sources: [mv_logistics_performance, mv_inventory_positions]
+  instructions_intro: "You are a supply chain analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "On-time rate is by shipment count, not weight or value: say so."
+    - "Inventory positions are snapshots: for a current total, filter to the latest snapshot date and say so."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is the on-time delivery rate by carrier this quarter?"
+    - "Which transport mode has the highest cost per kg?"
+    - "Which warehouses have the most positions below their reorder point?"
+    - "Show average transit days by origin region and month."
+
+pages:
+  - name: On-Time Delivery Rate
+    domain: Transportation
+    synonyms: [OTD]
+    description: "Share of shipments delivered within the promised transit days."
+    definition: "On-Time Delivery Rate = shipments with actual_days <= planned_days divided by all shipments, by count."
+    business_use: "Use on_time_rate in mv_logistics_performance, sliced by carrier, mode or region."
+    related: [mv_logistics_performance, fact_shipments, Supply Chain Genie]
+  - name: Below Reorder Point Rate
+    domain: Warehousing
+    synonyms: [stockout risk rate]
+    description: "Share of warehouse-product positions where stock is below the reorder point."
+    definition: "Below Reorder Point Rate = positions with on_hand_units < reorder_point divided by all positions in the slice."
+    business_use: "Use below_reorder_rate in mv_inventory_positions, preferably at a single snapshot date."
+    related: [mv_inventory_positions, fact_inventory_positions]

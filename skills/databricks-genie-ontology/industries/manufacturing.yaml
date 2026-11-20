@@ -1,0 +1,155 @@
+# Manufacturing - production performance (OEE), downtime and quality.
+spec_version: 1
+industry: manufacturing
+title: Discrete Manufacturing
+description: "Production, downtime and quality for plants and lines"
+catalog: genie_ontology_manufacturing
+schema: mfg_demo
+seed: 61
+history_days: 730
+domains: [Production, Quality, Maintenance]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_plant:
+    kind: dimension
+    rows: 5
+    comment: "Manufacturing plants."
+    domains: [Production]
+    columns:
+      plant_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the plant"}
+      plant_name: {type: string, gen: template, template: "Plant {i:02d}", comment: "Plant display name"}
+      country: {type: string, gen: choice, values: [Germany, India, Mexico, United States, China], comment: "Country of the plant"}
+  dim_line:
+    kind: dimension
+    rows: 20
+    comment: "Production lines. Each line belongs to one plant."
+    domains: [Production]
+    columns:
+      line_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the line"}
+      plant_key: {type: int, gen: fk, fk: dim_plant.plant_key, comment: "Plant the line belongs to"}
+      line_name: {type: string, gen: template, template: "Line {i:02d}", comment: "Line display name"}
+      line_type: {type: string, gen: choice, values: [Assembly, Machining, Packaging, Painting], comment: "Line type"}
+  dim_product:
+    kind: dimension
+    rows: 25
+    comment: "Finished products."
+    domains: [Production]
+    columns:
+      product_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the product"}
+      sku: {type: string, gen: template, template: "MFG-{i:04d}", comment: "Product SKU"}
+      product_family: {type: string, gen: choice, values: [Drivetrain, Housing, Control Unit, Sensor, Fastener Kit], comment: "Product family"}
+  fact_production:
+    kind: fact
+    rows: 6000
+    comment: "Production by line, product and shift. Grain: one line x product x shift x day."
+    domains: [Production, Quality]
+    cluster_by: [date_key, line_key]
+    columns:
+      production_id: {type: bigint, gen: seq, pk: true, comment: "Production record identifier"}
+      date_key: {type: int, gen: date_key, comment: "Production date"}
+      line_key: {type: int, gen: fk, fk: dim_line.line_key, comment: "Production line"}
+      plant_key: {type: int, gen: lookup, via: line_key, column: plant_key, fk: dim_plant.plant_key, comment: "Plant (denormalized from the line)"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, comment: "Product made"}
+      shift: {type: string, gen: choice, values: [A, B, C], comment: "Shift"}
+      planned_minutes: {type: int, gen: uniform, min: 360, max: 480, check: "> 0", comment: "Planned production minutes"}
+      downtime_frac: {type: double, gen: uniform, min: 0.02, max: 0.25, hidden: true}
+      downtime_minutes: {type: int, gen: derived, expr: "planned_minutes * downtime_frac", check: ">= 0", comment: "Unplanned downtime minutes"}
+      ideal_units: {type: int, gen: uniform, min: 300, max: 1200, check: "> 0", comment: "Units that could be made at ideal rate in the planned time"}
+      yield_frac: {type: double, gen: uniform, min: 0.65, max: 0.98, hidden: true}
+      units_produced: {type: int, gen: derived, expr: "ideal_units * yield_frac", check: ">= 0", comment: "Total units produced (good + scrap)"}
+      scrap_frac: {type: double, gen: uniform, min: 0.0, max: 0.06, hidden: true}
+      units_scrapped: {type: int, gen: derived, expr: "units_produced * scrap_frac", check: ">= 0", comment: "Units scrapped"}
+  fact_downtime_events:
+    kind: fact
+    rows: 2500
+    comment: "Downtime events. Grain: one stoppage."
+    domains: [Maintenance]
+    cluster_by: [date_key]
+    columns:
+      event_id: {type: bigint, gen: seq, pk: true, comment: "Downtime event identifier"}
+      date_key: {type: int, gen: date_key, comment: "Event date"}
+      line_key: {type: int, gen: fk, fk: dim_line.line_key, comment: "Line stopped"}
+      plant_key: {type: int, gen: lookup, via: line_key, column: plant_key, fk: dim_plant.plant_key, comment: "Plant (denormalized from the line)"}
+      reason: {type: string, gen: choice, values: [Changeover, Breakdown, Material Shortage, Planned Maintenance, Quality Hold], weights: [3, 3, 2, 2, 1], comment: "Downtime reason"}
+      duration_minutes: {type: int, gen: poisson, lam: 35, min: 1, check: "> 0", comment: "Stoppage duration in minutes"}
+
+metric_views:
+  mv_production_performance:
+    source: fact_production
+    comment: "Certified production metrics. OEE = availability x performance x quality, computed on summed minutes and units."
+    domains: [Production, Quality]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: line, table: dim_line, on: "source.line_key = line.line_key"}
+      - {name: plant, table: dim_plant, on: "source.plant_key = plant.plant_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+    dimensions:
+      - {name: production_date, expr: date.calendar_date, display_name: "Production Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: plant_name, expr: plant.plant_name, display_name: "Plant", synonyms: [factory, site]}
+      - {name: country, expr: plant.country, display_name: "Country", synonyms: [plant country]}
+      - {name: line_name, expr: line.line_name, display_name: "Line", synonyms: [production line]}
+      - {name: line_type, expr: line.line_type, display_name: "Line Type", synonyms: [process type]}
+      - {name: product_family, expr: product.product_family, display_name: "Product Family", synonyms: [family]}
+      - {name: shift, expr: source.shift, display_name: "Shift", synonyms: [shift name]}
+    measures:
+      - {name: units_produced, expr: "SUM(source.units_produced)", display_name: "Units Produced", format: integer, synonyms: [output, production volume]}
+      - {name: units_scrapped, expr: "SUM(source.units_scrapped)", display_name: "Units Scrapped", format: integer, synonyms: [scrap, rejects]}
+      - {name: scrap_rate, expr: "SUM(source.units_scrapped) / SUM(source.units_produced)", display_name: "Scrap Rate", format: rate, synonyms: [defect rate, reject rate]}
+      - {name: availability, expr: "1 - SUM(source.downtime_minutes) / SUM(source.planned_minutes)", display_name: "Availability", format: rate, comment: "1 - downtime / planned minutes", synonyms: [uptime]}
+      - {name: performance, expr: "SUM(source.units_produced) / SUM(source.ideal_units)", display_name: "Performance", format: rate, comment: "Units produced divided by ideal units", synonyms: [speed efficiency]}
+      - {name: quality, expr: "1 - SUM(source.units_scrapped) / SUM(source.units_produced)", display_name: "Quality", format: rate, comment: "Good units divided by units produced", synonyms: [first pass yield, FPY]}
+      - {name: oee, expr: "(1 - SUM(source.downtime_minutes) / SUM(source.planned_minutes)) * (SUM(source.units_produced) / SUM(source.ideal_units)) * (1 - SUM(source.units_scrapped) / SUM(source.units_produced))", display_name: "OEE", format: rate, comment: "Overall equipment effectiveness = availability x performance x quality", synonyms: [overall equipment effectiveness, equipment effectiveness]}
+  mv_downtime_analysis:
+    source: fact_downtime_events
+    comment: "Certified downtime metrics from recorded stoppage events."
+    domains: [Maintenance]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: line, table: dim_line, on: "source.line_key = line.line_key"}
+      - {name: plant, table: dim_plant, on: "source.plant_key = plant.plant_key"}
+    dimensions:
+      - {name: event_date, expr: date.calendar_date, display_name: "Event Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: reason, expr: source.reason, display_name: "Downtime Reason", synonyms: [stoppage reason, cause]}
+      - {name: plant_name, expr: plant.plant_name, display_name: "Plant", synonyms: [factory, site]}
+      - {name: line_name, expr: line.line_name, display_name: "Line", synonyms: [production line]}
+    measures:
+      - {name: event_count, expr: "COUNT(DISTINCT source.event_id)", display_name: "Stoppage Count", format: integer, synonyms: [stoppages, events]}
+      - {name: downtime_hours, expr: "SUM(source.duration_minutes) / 60.0", display_name: "Downtime Hours", format: decimal, synonyms: [hours lost]}
+      - {name: avg_stoppage_minutes, expr: "AVG(source.duration_minutes)", display_name: "Average Stoppage Minutes", format: decimal, synonyms: [MTTR proxy, average duration]}
+
+agent:
+  name: Manufacturing Analytics Genie
+  domain: Production
+  description: "Answers questions on OEE, scrap and downtime for plants and lines (synthetic data)."
+  sources: [mv_production_performance, mv_downtime_analysis]
+  instructions_intro: "You are a manufacturing operations analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "Compute OEE from the oee measure on summed values. Never average OEE percentages across rows."
+    - "Production minutes and recorded stoppage events come from different sources and will not reconcile exactly: say which one you used."
+    - "If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is OEE by plant this quarter?"
+    - "Which downtime reason loses the most hours?"
+    - "What is the scrap rate by product family?"
+    - "Compare availability, performance and quality for each line type."
+
+pages:
+  - name: Overall Equipment Effectiveness
+    domain: Production
+    synonyms: [OEE]
+    description: "Availability x performance x quality for a plant, line or period."
+    definition: "OEE = Availability x Performance x Quality, where Availability = 1 - downtime / planned minutes, Performance = units produced / ideal units, Quality = good units / units produced."
+    business_use: "Use the oee measure in mv_production_performance. Always compute from summed values, never by averaging ratios."
+    related: [mv_production_performance, fact_production, Manufacturing Analytics Genie]
+  - name: Scrap Rate
+    domain: Quality
+    synonyms: [defect rate, reject rate]
+    description: "Share of produced units that were scrapped."
+    definition: "Scrap Rate = SUM(units_scrapped) / SUM(units_produced)."
+    business_use: "Use scrap_rate in mv_production_performance, sliced by product family or line."
+    related: [mv_production_performance, fact_production]

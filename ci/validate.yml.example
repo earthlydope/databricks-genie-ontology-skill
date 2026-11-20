@@ -1,0 +1,22 @@
+name: validate
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy pyyaml
+      - name: Unit + pack tests
+        run: python -m unittest discover -s tests -v
+      - name: Validate and check every pack
+        run: |
+          cd skills/databricks-genie-ontology
+          python scripts/genie_onto.py validate industries/*.yaml
+          python scripts/genie_onto.py check industries/*.yaml
+      - name: Redaction scan (generic patterns)
+        run: bash skills/databricks-genie-ontology/scripts/redaction_scan.sh .

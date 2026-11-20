@@ -1,0 +1,152 @@
+# Consumer Packaged Goods / FMCG - secondary sales, trade promotions, shelf distribution.
+spec_version: 1
+industry: cpg_fmcg
+title: CPG and FMCG Commercial Analytics
+description: "Secondary sales by product, retailer and promotion, plus shelf availability"
+catalog: genie_ontology_cpg
+schema: cpg_demo
+seed: 11
+history_days: 730
+domains: [Sales, Trade Marketing, Supply]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_product:
+    kind: dimension
+    rows: 60
+    comment: "Product (SKU) dimension: brand, category and pack size."
+    domains: [Sales]
+    columns:
+      product_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the SKU"}
+      sku: {type: string, gen: template, template: "CPG-{i:04d}", comment: "SKU code (business key)"}
+      category: {type: string, gen: choice, values: [Beverages, Snacks, Personal Care, Home Care, Dairy], comment: "Product category"}
+      brand: {type: string, gen: choice, values: [Zesto, Lumina, Verdant, Pilot, Amber], comment: "Brand name"}
+      pack_size: {type: string, gen: choice, values: [Single, Family, Multipack, Trial], comment: "Pack format"}
+      list_price: {type: "decimal(10,2)", gen: uniform, min: 0.8, max: 14, comment: "List price per unit in USD"}
+  dim_retailer:
+    kind: dimension
+    rows: 40
+    comment: "Retailer and customer account dimension."
+    domains: [Sales]
+    columns:
+      retailer_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the retailer"}
+      retailer_name: {type: string, gen: template, template: "Retailer {i:03d}", comment: "Retailer display name"}
+      channel: {type: string, gen: choice, values: [Modern Trade, General Trade, E-commerce, Distributor], weights: [4, 3, 2, 1], comment: "Trade channel"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Sales region"}
+      tier: {type: string, gen: choice, values: [Key Account, Regional, Local], weights: [1, 3, 6], comment: "Account tier"}
+  dim_promotion:
+    kind: dimension
+    rows: 6
+    comment: "Trade promotion mechanics. Row 1..6; promotion mechanic and depth."
+    domains: [Trade Marketing]
+    columns:
+      promotion_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the promotion"}
+      promo_type: {type: string, gen: choice, values: [No Promotion, Price Off, Buy One Get One, Display, Bundle, Loyalty Offer], comment: "Promotion mechanic"}
+      discount_pct: {type: double, gen: uniform, min: 0.0, max: 0.3, comment: "Average discount depth as a fraction of list price"}
+  fact_secondary_sales:
+    kind: fact
+    rows: 6000
+    comment: "Secondary sales to retailers. Grain: one SKU x retailer x promotion x day."
+    domains: [Sales, Trade Marketing]
+    cluster_by: [date_key, product_key]
+    checks: {net_is_gross_minus_discount: "net_sales = gross_sales - discount_amount"}
+    columns:
+      sale_id: {type: bigint, gen: seq, pk: true, comment: "Sale line identifier"}
+      date_key: {type: int, gen: date_key, comment: "Invoice date"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, skew: 0.6, comment: "SKU sold"}
+      retailer_key: {type: int, gen: fk, fk: dim_retailer.retailer_key, comment: "Retailer billed"}
+      promotion_key: {type: int, gen: fk, fk: dim_promotion.promotion_key, comment: "Promotion applied"}
+      units: {type: int, gen: uniform, min: 10, max: 600, check: "> 0", comment: "Units sold"}
+      price_ref: {type: "decimal(10,2)", gen: lookup, via: product_key, column: list_price, hidden: true}
+      depth_ref: {type: double, gen: lookup, via: promotion_key, column: discount_pct, hidden: true}
+      gross_sales: {type: "decimal(12,2)", gen: derived, expr: "units * price_ref", comment: "Gross sales at list price, USD"}
+      discount_amount: {type: "decimal(12,2)", gen: derived, expr: "gross_sales * depth_ref", check: ">= 0", comment: "Trade discount given, USD"}
+      net_sales: {type: "decimal(12,2)", gen: derived, expr: "gross_sales - discount_amount", comment: "Net sales after trade discount, USD"}
+  fact_shelf_audit:
+    kind: fact
+    rows: 3000
+    comment: "Shelf audits. Grain: one SKU x retailer x audit day."
+    domains: [Supply]
+    columns:
+      audit_id: {type: bigint, gen: seq, pk: true, comment: "Audit line identifier"}
+      date_key: {type: int, gen: date_key, comment: "Audit date"}
+      product_key: {type: int, gen: fk, fk: dim_product.product_key, comment: "SKU audited"}
+      retailer_key: {type: int, gen: fk, fk: dim_retailer.retailer_key, comment: "Retailer audited"}
+      in_stock: {type: boolean, gen: bool, p: 0.9, comment: "True if the SKU was on shelf"}
+      shelf_facings: {type: int, gen: poisson, lam: 3, comment: "Number of facings on shelf"}
+
+metric_views:
+  mv_secondary_sales:
+    source: fact_secondary_sales
+    comment: "Certified secondary sales metrics. Gross-to-net is gross_sales minus trade discount."
+    domains: [Sales, Trade Marketing]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+      - {name: retailer, table: dim_retailer, on: "source.retailer_key = retailer.retailer_key"}
+      - {name: promo, table: dim_promotion, on: "source.promotion_key = promo.promotion_key"}
+    dimensions:
+      - {name: invoice_date, expr: date.calendar_date, display_name: "Invoice Date", synonyms: [sale date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: category, expr: product.category, display_name: "Category", synonyms: [product category]}
+      - {name: brand, expr: product.brand, display_name: "Brand", synonyms: [brand name]}
+      - {name: channel, expr: retailer.channel, display_name: "Channel", synonyms: [trade channel]}
+      - {name: region, expr: retailer.region, display_name: "Region", synonyms: [sales region]}
+      - {name: promo_type, expr: promo.promo_type, display_name: "Promotion Type", synonyms: [promo mechanic]}
+    measures:
+      - {name: net_sales, expr: "SUM(source.net_sales)", display_name: "Net Sales", format: currency, comment: "Gross sales minus trade discount", synonyms: [revenue, NSV, net revenue]}
+      - {name: gross_sales, expr: "SUM(source.gross_sales)", display_name: "Gross Sales", format: currency, synonyms: [GSV, list sales]}
+      - {name: trade_spend, expr: "SUM(source.discount_amount)", display_name: "Trade Spend", format: currency, synonyms: [discounts, promo spend]}
+      - {name: units_sold, expr: "SUM(source.units)", display_name: "Units Sold", format: integer, synonyms: [volume, cases]}
+      - {name: trade_spend_rate, expr: "SUM(source.discount_amount) / SUM(source.gross_sales)", display_name: "Trade Spend Rate", format: rate, comment: "Trade spend as a fraction of gross sales", synonyms: [gross to net rate, discount rate]}
+  mv_shelf_availability:
+    source: fact_shelf_audit
+    comment: "Certified on-shelf availability metrics from retail audits."
+    domains: [Supply]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: product, table: dim_product, on: "source.product_key = product.product_key"}
+      - {name: retailer, table: dim_retailer, on: "source.retailer_key = retailer.retailer_key"}
+    dimensions:
+      - {name: audit_date, expr: date.calendar_date, display_name: "Audit Date", synonyms: [visit date]}
+      - {name: category, expr: product.category, display_name: "Category", synonyms: [product category]}
+      - {name: brand, expr: product.brand, display_name: "Brand", synonyms: [brand name]}
+      - {name: channel, expr: retailer.channel, display_name: "Channel", synonyms: [trade channel]}
+      - {name: region, expr: retailer.region, display_name: "Region", synonyms: [sales region]}
+    measures:
+      - {name: audits, expr: "COUNT(1)", display_name: "Audit Lines", format: integer, synonyms: [checks, visits]}
+      - {name: out_of_stock_rate, expr: "AVG(CASE WHEN source.in_stock THEN 0.0 ELSE 1.0 END)", display_name: "Out-of-Stock Rate", format: rate, comment: "Share of audit lines where the SKU was not on shelf", synonyms: [OOS rate, stockout rate]}
+      - {name: avg_facings, expr: "AVG(source.shelf_facings)", display_name: "Average Facings", format: decimal, synonyms: [shelf share, facings]}
+
+agent:
+  name: CPG Commercial Genie
+  domain: Sales
+  description: "Answers questions on net sales, trade spend, promotions and on-shelf availability."
+  sources: [mv_secondary_sales, mv_shelf_availability]
+  instructions_intro: "You are a CPG commercial analytics assistant."
+  instructions:
+    - "Prefer the metric views over raw tables. Net sales means net_sales in mv_secondary_sales."
+    - "Promo lift is not a stored measure: compare net_sales per day for promoted vs No Promotion slices and say how you did it."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What was net sales by category last quarter?"
+    - "Which promotion type has the highest trade spend rate?"
+    - "Which channel has the highest out-of-stock rate?"
+    - "Show gross sales vs net sales by brand."
+
+pages:
+  - name: Net Sales
+    domain: Sales
+    synonyms: [NSV, net revenue]
+    description: "Gross sales less trade discounts, in USD."
+    definition: "Net Sales = SUM(gross_sales) - SUM(discount_amount) on fact_secondary_sales."
+    business_use: "Use the net_sales measure of mv_secondary_sales. Gross-to-net is trade_spend_rate."
+    related: [mv_secondary_sales, fact_secondary_sales, CPG Commercial Genie]
+  - name: Out-of-Stock Rate
+    domain: Supply
+    synonyms: [OOS, stockout rate]
+    description: "Share of shelf audit lines where a SKU was not on shelf."
+    definition: "Out-of-Stock Rate = audit lines with in_stock = false divided by all audit lines."
+    business_use: "Use out_of_stock_rate in mv_shelf_availability, sliced by channel or region."
+    related: [mv_shelf_availability, fact_shelf_audit]

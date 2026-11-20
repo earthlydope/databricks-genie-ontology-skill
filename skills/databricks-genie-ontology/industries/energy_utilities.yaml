@@ -1,0 +1,139 @@
+# Energy and utilities - consumption/billing and grid reliability.
+spec_version: 1
+industry: energy_utilities
+title: Electric Utility
+description: "Meter consumption and billing, and grid outage reliability"
+catalog: genie_ontology_energy
+schema: utility_demo
+seed: 81
+history_days: 730
+domains: [Customer Energy, Grid Reliability, Finance]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_meter:
+    kind: dimension
+    rows: 300
+    comment: "Smart meters and the customer type they serve."
+    domains: [Customer Energy]
+    columns:
+      meter_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the meter"}
+      meter_id: {type: string, gen: template, template: "MTR-{i:05d}", comment: "Meter identifier"}
+      customer_type: {type: string, gen: choice, values: [Residential, Commercial, Industrial], weights: [7, 2, 1], comment: "Customer type"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Service region"}
+      tariff: {type: string, gen: choice, values: [Flat, Time of Use, Demand], weights: [5, 4, 1], comment: "Tariff plan"}
+  dim_asset:
+    kind: dimension
+    rows: 60
+    comment: "Grid assets (feeders, transformers, substations)."
+    domains: [Grid Reliability]
+    columns:
+      asset_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the asset"}
+      asset_name: {type: string, gen: template, template: "Asset {i:03d}", comment: "Asset display name"}
+      asset_type: {type: string, gen: choice, values: [Feeder, Transformer, Substation], weights: [5, 4, 1], comment: "Asset type"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Asset region"}
+      criticality: {type: string, gen: choice, values: [High, Medium, Low], weights: [2, 4, 4], comment: "Criticality class"}
+      customers_served: {type: int, gen: uniform, min: 300, max: 4000, check: "> 0", comment: "Customers served downstream of the asset (the SAIDI base for feeders)"}
+  fact_consumption:
+    kind: fact
+    rows: 9000
+    comment: "Sampled meter readings and billing. Grain: one meter x day (a sample of days, not every day)."
+    domains: [Customer Energy, Finance]
+    cluster_by: [date_key, meter_key]
+    columns:
+      reading_id: {type: bigint, gen: seq, pk: true, comment: "Reading identifier"}
+      date_key: {type: int, gen: date_key, comment: "Reading date"}
+      meter_key: {type: int, gen: fk, fk: dim_meter.meter_key, comment: "Meter read"}
+      kwh: {type: "decimal(10,2)", gen: lognormal, mean: 3.0, sigma: 0.8, min: 0.5, max: 4000, check: "> 0", comment: "Energy consumed in kWh"}
+      peak_share: {type: double, gen: uniform, min: 0.1, max: 0.5, hidden: true}
+      peak_kwh: {type: "decimal(10,2)", gen: derived, expr: "kwh * peak_share", check: ">= 0", comment: "Portion of kWh consumed in peak hours"}
+      rate_ref: {type: double, gen: uniform, min: 0.09, max: 0.22, hidden: true}
+      billed_amount: {type: "decimal(10,2)", gen: derived, expr: "kwh * rate_ref", check: ">= 0", comment: "Billed amount in USD"}
+  fact_outages:
+    kind: fact
+    rows: 800
+    comment: "Outage events. Grain: one outage."
+    domains: [Grid Reliability]
+    columns:
+      outage_id: {type: bigint, gen: seq, pk: true, comment: "Outage identifier"}
+      date_key: {type: int, gen: date_key, comment: "Outage start date"}
+      asset_key: {type: int, gen: fk, fk: dim_asset.asset_key, skew: 0.6, comment: "Asset that failed"}
+      cause: {type: string, gen: choice, values: [Weather, Equipment Failure, Vegetation, Third Party, Planned Work], weights: [3, 3, 2, 1, 2], comment: "Outage cause"}
+      duration_minutes: {type: int, gen: lognormal, mean: 4.2, sigma: 0.9, min: 1, max: 1440, check: "> 0", comment: "Outage duration in minutes (long-tailed: most are short, a few last many hours)"}
+      served_ref: {type: int, gen: lookup, via: asset_key, column: customers_served, hidden: true}
+      affected_frac: {type: double, gen: uniform, min: 0.02, max: 0.3, hidden: true}
+      customers_affected: {type: int, gen: derived, expr: "served_ref * affected_frac + 1", check: "> 0", comment: "Customers interrupted (a share of those served by the failed asset)"}
+      customer_minutes: {type: bigint, gen: derived, expr: "duration_minutes * customers_affected", check: "> 0", comment: "Customer-minutes interrupted (duration x customers)"}
+
+metric_views:
+  mv_energy_consumption:
+    source: fact_consumption
+    comment: "Certified consumption and billing metrics."
+    domains: [Customer Energy, Finance]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: meter, table: dim_meter, on: "source.meter_key = meter.meter_key"}
+    dimensions:
+      - {name: reading_date, expr: date.calendar_date, display_name: "Reading Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: customer_type, expr: meter.customer_type, display_name: "Customer Type", synonyms: [customer class, sector]}
+      - {name: region, expr: meter.region, display_name: "Region", synonyms: [service region]}
+      - {name: tariff, expr: meter.tariff, display_name: "Tariff", synonyms: [rate plan]}
+    measures:
+      - {name: total_kwh, expr: "SUM(source.kwh)", display_name: "Energy Consumed kWh", format: decimal, synonyms: [consumption, usage, load]}
+      - {name: peak_kwh, expr: "SUM(source.peak_kwh)", display_name: "Peak Energy kWh", format: decimal, synonyms: [peak consumption]}
+      - {name: peak_share, expr: "SUM(source.peak_kwh) / SUM(source.kwh)", display_name: "Peak Share", format: rate, synonyms: [peak ratio]}
+      - {name: billed_amount, expr: "SUM(source.billed_amount)", display_name: "Billed Amount", format: currency, synonyms: [revenue, billing]}
+      - {name: avg_rate, expr: "SUM(source.billed_amount) / SUM(source.kwh)", display_name: "Average Rate per kWh", format: rate, synonyms: [realized rate, price per kWh]}
+  mv_grid_reliability:
+    source: fact_outages
+    comment: "Certified outage metrics. SAIDI needs the customer base and is defined on the SAIDI page."
+    domains: [Grid Reliability]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: asset, table: dim_asset, on: "source.asset_key = asset.asset_key"}
+    dimensions:
+      - {name: outage_date, expr: date.calendar_date, display_name: "Outage Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: cause, expr: source.cause, display_name: "Outage Cause", synonyms: [root cause]}
+      - {name: asset_type, expr: asset.asset_type, display_name: "Asset Type", synonyms: [equipment type]}
+      - {name: criticality, expr: asset.criticality, display_name: "Asset Criticality", synonyms: [criticality class]}
+      - {name: region, expr: asset.region, display_name: "Region", synonyms: [grid region]}
+    measures:
+      - {name: outage_count, expr: "COUNT(DISTINCT source.outage_id)", display_name: "Outage Count", format: integer, synonyms: [outages, interruptions]}
+      - {name: customer_minutes, expr: "SUM(source.customer_minutes)", display_name: "Customer Minutes Interrupted", format: integer, synonyms: [CMI]}
+      - {name: customers_interrupted, expr: "SUM(source.customers_affected)", display_name: "Customers Interrupted", format: integer, synonyms: [CI, customers affected]}
+      - {name: avg_outage_minutes, expr: "AVG(source.duration_minutes)", display_name: "Average Outage Minutes", format: decimal, synonyms: [average duration, CAIDI proxy]}
+
+agent:
+  name: Utility Analytics Genie
+  domain: Grid Reliability
+  description: "Answers questions on consumption, billing and grid reliability (synthetic data)."
+  sources: [mv_energy_consumption, mv_grid_reliability]
+  instructions_intro: "You are an electric utility analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "SAIDI is not a stored measure: divide customer_minutes by SUM(customers_served) of the Feeder assets in dim_asset for the same area and period, and say that is the base you used."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is consumption by customer type and month?"
+    - "Which outage cause produces the most customer minutes interrupted?"
+    - "What is the average rate per kWh by tariff?"
+    - "Which regions have the most outages on high-criticality assets?"
+
+pages:
+  - name: SAIDI
+    domain: Grid Reliability
+    synonyms: [System Average Interruption Duration Index]
+    description: "Average minutes of interruption per customer served."
+    definition: "SAIDI = customer minutes interrupted / customers served, for the same area and period. The outage fact holds the minutes; the customer base is customers_served on dim_asset, so SAIDI spans two sources and is not a stored measure."
+    business_use: "Use customer_minutes from mv_grid_reliability and divide by SUM(customers_served) over the Feeder assets of dim_asset in the same region (an approximation: feeders are the unit that serves customers)."
+    related: [mv_grid_reliability, fact_outages, dim_asset, Utility Analytics Genie]
+  - name: Peak Share
+    domain: Customer Energy
+    synonyms: [peak ratio]
+    description: "Share of energy consumed in peak hours."
+    definition: "Peak Share = SUM(peak_kwh) / SUM(kwh)."
+    business_use: "Use peak_share in mv_energy_consumption by customer type or tariff."
+    related: [mv_energy_consumption, fact_consumption]

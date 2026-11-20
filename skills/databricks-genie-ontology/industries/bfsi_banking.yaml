@@ -1,0 +1,153 @@
+# BFSI - retail and SME banking: deposits and payments, lending portfolio quality, fraud.
+# All data is synthetic. Customer names are tagged pii to demonstrate classification.
+spec_version: 1
+industry: bfsi_banking
+title: Retail Banking
+description: "Customers, accounts, payments and loan portfolio quality"
+catalog: genie_ontology_banking
+schema: banking_demo
+seed: 21
+history_days: 730
+domains: [Customer, Payments, Lending, Risk and Fraud]
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}
+  dim_customer:
+    kind: dimension
+    rows: 300
+    comment: "Banking customer dimension (synthetic)."
+    domains: [Customer]
+    columns:
+      customer_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the customer"}
+      customer_name: {type: string, gen: template, template: "Customer {i:04d}", pii: true, comment: "Customer display name"}
+      segment: {type: string, gen: choice, values: [Mass Retail, Premium, SME, Corporate], weights: [6, 2, 3, 1], comment: "Customer segment"}
+      region: {type: string, gen: choice, values: [North, South, East, West], comment: "Home region"}
+      kyc_status: {type: string, gen: choice, values: [Verified, Pending, Expired], weights: [8, 1, 1], comment: "KYC verification status"}
+      onboarding_date: {type: date, gen: date, start_offset_days: -2500, end_offset_days: -30, classification: internal, comment: "Date the customer was onboarded"}
+  dim_account:
+    kind: dimension
+    rows: 450
+    comment: "Deposit and card accounts."
+    domains: [Payments]
+    columns:
+      account_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the account"}
+      customer_key: {type: int, gen: fk, fk: dim_customer.customer_key, comment: "Owning customer"}
+      account_type: {type: string, gen: choice, values: [Savings, Current, Credit Card], weights: [5, 3, 3], comment: "Account type"}
+      status: {type: string, gen: choice, values: [Active, Dormant, Closed], weights: [8, 2, 1], comment: "Account status"}
+  dim_loan:
+    kind: dimension
+    rows: 250
+    comment: "Loan accounts with sanctioned amount and rate."
+    domains: [Lending]
+    columns:
+      loan_key: {type: int, gen: seq, pk: true, comment: "Surrogate key for the loan"}
+      customer_key: {type: int, gen: fk, fk: dim_customer.customer_key, comment: "Borrower"}
+      loan_type: {type: string, gen: choice, values: [Home, Personal, Auto, SME Working Capital], weights: [3, 4, 3, 2], comment: "Loan product"}
+      sanctioned_amount: {type: "decimal(14,2)", gen: lognormal, mean: 11.5, sigma: 0.6, min: 5000, max: 900000, comment: "Sanctioned amount in USD"}
+      interest_rate: {type: double, gen: uniform, min: 0.06, max: 0.18, comment: "Annual interest rate as a fraction"}
+  fact_transactions:
+    kind: fact
+    rows: 9000
+    comment: "Account transactions. Grain: one transaction."
+    domains: [Payments, Risk and Fraud]
+    cluster_by: [date_key, account_key]
+    columns:
+      txn_id: {type: bigint, gen: seq, start: 1000000, pk: true, comment: "Transaction identifier"}
+      date_key: {type: int, gen: date_key, comment: "Transaction date"}
+      account_key: {type: int, gen: fk, fk: dim_account.account_key, comment: "Account transacted on"}
+      customer_key: {type: int, gen: lookup, via: account_key, column: customer_key, fk: dim_customer.customer_key, comment: "Owning customer (denormalized from the account)"}
+      txn_type: {type: string, gen: choice, values: [Deposit, Withdrawal, Transfer, Card Spend, Bill Payment, Fee], weights: [3, 2, 3, 5, 2, 1], comment: "Transaction type"}
+      amount: {type: "decimal(12,2)", gen: lognormal, mean: 4.5, sigma: 1.1, min: 1, max: 50000, check: "> 0", comment: "Transaction amount in USD"}
+      channel: {type: string, gen: choice, values: [Mobile, Web, Branch, ATM, POS], weights: [4, 2, 1, 1, 4], comment: "Channel used"}
+      fraud_flag: {type: boolean, gen: bool, p: 0.012, comment: "True if the transaction was confirmed fraudulent"}
+  fact_loan_snapshots:
+    kind: fact
+    rows: 2500
+    comment: "Monthly loan snapshots. Grain: one loan x snapshot."
+    domains: [Lending]
+    cluster_by: [date_key, loan_key]
+    columns:
+      snapshot_id: {type: bigint, gen: seq, pk: true, comment: "Snapshot row identifier"}
+      date_key: {type: int, gen: date_key, comment: "Snapshot date"}
+      loan_key: {type: int, gen: fk, fk: dim_loan.loan_key, comment: "Loan snapshotted"}
+      customer_key: {type: int, gen: lookup, via: loan_key, column: customer_key, fk: dim_customer.customer_key, comment: "Borrower (denormalized from the loan)"}
+      outstanding_balance: {type: "decimal(14,2)", gen: lognormal, mean: 10.8, sigma: 0.7, min: 1000, max: 800000, check: ">= 0", comment: "Principal outstanding in USD"}
+      days_past_due: {type: int, gen: lognormal, mean: 2.0, sigma: 1.6, min: 0, max: 400, check: ">= 0", comment: "Days past due at snapshot (long-tailed: most loans are current, a few are deeply delinquent)"}
+      npa_flag: {type: boolean, gen: derived, expr: "days_past_due > 90", comment: "True if more than 90 days past due (non-performing)"}
+
+metric_views:
+  mv_transaction_activity:
+    source: fact_transactions
+    comment: "Certified payment activity and fraud metrics. fraud_rate is by transaction count."
+    domains: [Payments, Risk and Fraud]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: account, table: dim_account, on: "source.account_key = account.account_key"}
+      - {name: customer, table: dim_customer, on: "source.customer_key = customer.customer_key"}
+    dimensions:
+      - {name: txn_date, expr: date.calendar_date, display_name: "Transaction Date", synonyms: [date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: month_name, expr: date.month_name, display_name: "Month", synonyms: [calendar month]}
+      - {name: txn_type, expr: source.txn_type, display_name: "Transaction Type", synonyms: [type]}
+      - {name: channel, expr: source.channel, display_name: "Channel", synonyms: [payment channel]}
+      - {name: account_type, expr: account.account_type, display_name: "Account Type", synonyms: [product]}
+      - {name: customer_segment, expr: customer.segment, display_name: "Customer Segment", synonyms: [segment]}
+      - {name: customer_region, expr: customer.region, display_name: "Customer Region", synonyms: [region]}
+    measures:
+      - {name: txn_count, expr: "COUNT(1)", display_name: "Transaction Count", format: integer, synonyms: [transactions, volume]}
+      - {name: txn_value, expr: "SUM(source.amount)", display_name: "Transaction Value", format: currency, synonyms: [total amount, throughput]}
+      - {name: avg_txn_value, expr: "SUM(source.amount) / COUNT(1)", display_name: "Average Transaction Value", format: currency, synonyms: [ticket size]}
+      - {name: fraud_count, expr: "SUM(CASE WHEN source.fraud_flag THEN 1 ELSE 0 END)", display_name: "Fraud Count", format: integer, synonyms: [fraudulent transactions]}
+      - {name: fraud_rate, expr: "SUM(CASE WHEN source.fraud_flag THEN 1.0 ELSE 0.0 END) / COUNT(1)", display_name: "Fraud Rate", format: rate, comment: "Fraudulent transactions divided by all transactions", synonyms: [fraud ratio]}
+  mv_loan_portfolio:
+    source: fact_loan_snapshots
+    comment: "Certified loan portfolio quality. NPA = more than 90 days past due. Use snapshot-level filters for point-in-time balances."
+    domains: [Lending]
+    joins:
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: loan, table: dim_loan, on: "source.loan_key = loan.loan_key"}
+      - {name: customer, table: dim_customer, on: "source.customer_key = customer.customer_key"}
+    dimensions:
+      - {name: snapshot_date, expr: date.calendar_date, display_name: "Snapshot Date", synonyms: [as of date]}
+      - {name: year, expr: date.year, display_name: "Year", synonyms: [calendar year]}
+      - {name: loan_type, expr: loan.loan_type, display_name: "Loan Type", synonyms: [product, loan product]}
+      - {name: customer_segment, expr: customer.segment, display_name: "Customer Segment", synonyms: [segment]}
+      - {name: customer_region, expr: customer.region, display_name: "Customer Region", synonyms: [region]}
+    measures:
+      - {name: outstanding_balance, expr: "SUM(source.outstanding_balance)", display_name: "Outstanding Balance", format: currency, comment: "Sum over the selected snapshots", synonyms: [exposure, book size]}
+      - {name: npa_balance, expr: "SUM(CASE WHEN source.npa_flag THEN source.outstanding_balance ELSE 0 END)", display_name: "NPA Balance", format: currency, synonyms: [bad loans, non performing balance]}
+      - {name: npa_ratio, expr: "SUM(CASE WHEN source.npa_flag THEN source.outstanding_balance ELSE 0 END) / SUM(source.outstanding_balance)", display_name: "NPA Ratio", format: rate, comment: "NPA balance divided by outstanding balance", synonyms: [gross NPA, NPL ratio]}
+      - {name: avg_days_past_due, expr: "AVG(source.days_past_due)", display_name: "Average Days Past Due", format: decimal, synonyms: [delinquency days]}
+
+agent:
+  name: Banking Analytics Genie
+  domain: Lending
+  description: "Answers questions on payments, fraud and loan portfolio quality from certified metric views."
+  sources: [mv_transaction_activity, mv_loan_portfolio]
+  instructions_intro: "You are a retail banking analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "Never output customer names; aggregate to segment or region."
+    - "Balances are point-in-time: when asked for the current book, filter to the latest snapshot date and say so."
+    - "Monetary figures are in USD. If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "What is the fraud rate by channel this year?"
+    - "Which loan type has the highest NPA ratio?"
+    - "Show transaction value by customer segment and month."
+    - "How does average days past due vary by region?"
+
+pages:
+  - name: NPA Ratio
+    domain: Lending
+    synonyms: [gross NPA, NPL ratio]
+    description: "Share of the loan book that is more than 90 days past due."
+    definition: "NPA Ratio = outstanding balance of loans more than 90 days past due divided by total outstanding balance, at the same snapshot date."
+    business_use: "Use npa_ratio in mv_loan_portfolio. Always state the snapshot date or period."
+    related: [mv_loan_portfolio, fact_loan_snapshots, Banking Analytics Genie]
+  - name: Fraud Rate
+    domain: Risk and Fraud
+    synonyms: [fraud ratio]
+    description: "Confirmed fraudulent transactions as a share of all transactions."
+    definition: "Fraud Rate = count of fraud_flag = true transactions divided by all transactions in the slice. It is by count, not value."
+    business_use: "Use fraud_rate in mv_transaction_activity, sliced by channel or transaction type."
+    related: [mv_transaction_activity, fact_transactions]

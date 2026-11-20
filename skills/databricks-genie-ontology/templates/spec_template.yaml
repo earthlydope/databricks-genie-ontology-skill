@@ -1,0 +1,80 @@
+# Annotated starting point for a new industry spec. Copy, rename, fill in. Validate with:
+#   python3 scripts/genie_onto.py validate my_spec.yaml && python3 scripts/genie_onto.py check my_spec.yaml
+# Full reference: references/03-spec-format.md
+spec_version: 1
+industry: my_industry                 # snake_case
+title: My Industry Demo
+description: "One sentence about the business area"
+catalog: genie_ontology_my_industry   # overridable at deploy time
+schema: my_demo
+seed: 7
+history_days: 730
+domains: [Domain A, Domain B]         # 3-5 business areas; names become governed tag keys
+
+tables:
+  dim_date: {kind: dimension, generator: calendar, comment: "Date dimension, one row per day."}   # include if any column uses gen: date_key
+  dim_thing:
+    kind: dimension
+    rows: 50
+    comment: "What one row is, and anything a user must know."
+    domains: [Domain A]
+    columns:
+      thing_key: {type: int, gen: seq, pk: true, comment: "Surrogate key"}
+      thing_name: {type: string, gen: template, template: "Thing {i:03d}", comment: "Display name"}
+      category: {type: string, gen: choice, values: [Alpha, Beta, Gamma], weights: [5, 3, 2], comment: "Category"}
+      owner_name: {type: string, gen: template, template: "Person {i:03d}", pii: true, comment: "Synthetic person name (tagged pii)"}
+  fact_event:
+    kind: fact
+    rows: 3000
+    comment: "Grain: one event. State the grain."
+    domains: [Domain A, Domain B]
+    cluster_by: [date_key, thing_key]
+    checks: {total_matches: "total = quantity * unit_value"}          # table-level rule (SQL subset)
+    columns:
+      event_id: {type: bigint, gen: seq, start: 1000, pk: true, comment: "Event identifier"}
+      date_key: {type: int, gen: date_key, comment: "Event date"}                                   # auto-FK to dim_date
+      thing_key: {type: int, gen: fk, fk: dim_thing.thing_key, skew: 0.6, comment: "Thing involved"} # skew = popularity
+      quantity: {type: int, gen: uniform, min: 1, max: 9, check: "> 0", comment: "Units"}
+      unit_value: {type: "decimal(10,2)", gen: lognormal, mean: 3.5, sigma: 0.7, min: 1, max: 900, comment: "Value per unit"}
+      total: {type: "decimal(12,2)", gen: derived, expr: "quantity * unit_value", comment: "quantity x unit_value"}
+      flagged: {type: boolean, gen: bool, p: 0.08, comment: "True if flagged"}                       # keep p between ~0.02 and ~0.5: avoid degenerate ratios
+
+metric_views:
+  mv_events:
+    source: fact_event
+    comment: "Certified event metrics."
+    domains: [Domain A]
+    joins:                             # FLAT: on-clause only references `source` and the join's own name
+      - {name: date, table: dim_date, on: "source.date_key = date.date_key"}
+      - {name: thing, table: dim_thing, on: "source.thing_key = thing.thing_key"}
+    dimensions:
+      - {name: event_date, expr: date.calendar_date, display_name: "Event Date", synonyms: [date]}
+      - {name: category, expr: thing.category, display_name: "Category", synonyms: [type]}
+    measures:
+      - {name: total_value, expr: "SUM(source.total)", display_name: "Total Value", format: currency, comment: "Sum of totals", synonyms: [revenue, value]}
+      - {name: event_count, expr: "COUNT(DISTINCT source.event_id)", display_name: "Event Count", format: integer, synonyms: [events]}
+      - {name: flagged_rate, expr: "AVG(CASE WHEN source.flagged THEN 1.0 ELSE 0.0 END)", display_name: "Flagged Rate", format: decimal, synonyms: [flag rate]}
+
+agent:
+  name: My Industry Genie
+  domain: Domain A
+  description: "Answers questions about ... from certified metric views."
+  sources: [mv_events]
+  instructions_intro: "You are a ... analytics assistant. All data is synthetic."
+  instructions:
+    - "Prefer the metric views over raw tables."
+    - "<Cross-fact KPI> is not a stored measure: compute <numerator measure> / <denominator measure> for the same period and slice, and say so."
+    - "If the time range is ambiguous, use the trailing 12 months and state it."
+  questions:
+    - "A measure by a dimension?"
+    - "A ratio this year vs last year?"
+    - "A cross-view question?"
+
+pages:
+  - name: Flagged Rate
+    domain: Domain A
+    synonyms: [flag rate]
+    description: "One line."
+    definition: "Exact formula and the grain it applies to."
+    business_use: "Which measure/view to use, and caveats."
+    related: [mv_events, fact_event, My Industry Genie]
