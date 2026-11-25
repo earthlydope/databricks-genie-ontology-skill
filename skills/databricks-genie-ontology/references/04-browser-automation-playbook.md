@@ -1,3 +1,9 @@
+---
+title: Browser automation playbook
+kind: reference
+summary: How to drive the Databricks UI reliably: paste instead of type, coordinates, timing, DOM reads, notebooks, Catalog Explorer, Domains, Pages, Genie agents.
+read_when: You must do a UI-only step, or a click, paste or read misbehaves.
+---
 # 04 - Browser automation playbook (Databricks UI)
 
 Learned by driving a real workspace with a Chromium-based browser pane (works the same with a Chrome extension toolset).
@@ -21,7 +27,7 @@ Principle: **read with DOM/JS, act with real input events, verify by reading aga
 ## Notebooks (the workhorse)
 - Create: `/editor/notebooks/create?parentId=<folder id>&o=<ws>` opens a new Python notebook with an empty focused cell. (Or Workspace > Create > Notebook.)
 - **Never type code** into the cell: Monaco auto-indents, auto-closes brackets/quotes and pops suggestions (Enter accepts a suggestion). Paste instead:
-  `scripts/browser/paste_into_monaco.js` dispatches a `paste` event with a `DataTransfer` on the editor's hidden textarea. Pasted successfully at 72 KB (the largest generated cell tested); keep an eye on size if a spec grows.
+  `scripts/browser/paste_into_monaco.js` dispatches a `paste` event with a `DataTransfer` on the editor's hidden textarea. Pasted successfully at 72 KB (the largest cell tested in the original build). Generated cells are now about 72-80 KB (`notebook` prints a note above 72,000 characters): after pasting, read the cell back and compare its length, or import the notebook file instead of pasting.
 - Large payloads from your machine: serve them from the hardened throwaway server `scripts/browser/serve_files.py <dir> <port> <workspace-origin>` (127.0.0.1 only, CORS limited to that one origin, random path token, no directory listing, refuses folders holding `config.env`/`STATE.md`/`.git`)
   and fetch from the page (`fetch('http://127.0.0.1:PORT/<token>/file',{credentials:'omit'})`). Script-tag loading is blocked by the page. Copy only the generated files into a fresh folder, and stop the server afterwards (`pkill -f serve_files.py`).
   Native Cmd+V from synthetic key events does **not** paste, and `navigator.clipboard.readText()` is permission-denied.
@@ -58,7 +64,7 @@ Principle: **read with DOM/JS, act with real input events, verify by reading aga
 - Sidebar sparkle icon toggles the Genie Code panel; it persists across pages.
 
 ## Genie Code panel
-Use it to draft; extract the answer with JS (`[...document.querySelectorAll('pre, code')]` longest), review it, then run it yourself in a notebook (`07`).
+Use it to draft; extract the answer with JS (`[...document.querySelectorAll('pre, code')]` longest), review it, then run it yourself in a notebook ([enrichment pattern](07-genie-code-enrichment.md)).
 
 ## Quick recipes
 - Wait for completion without polling the screenshot: `wait 10` in a batch of 3-6, then one JS read.

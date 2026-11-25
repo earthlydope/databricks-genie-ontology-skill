@@ -1,6 +1,13 @@
+---
+title: Data quality and table features
+kind: reference
+summary: What the builder applies (constraints, clustering, CDF, stats, tags, audit), schema-level Data Quality Monitoring, and governance metadata.
+read_when: You are hardening the tables or enabling monitoring.
+---
 # 06 - Data quality, table features and governance metadata
 
-## What the builder applies (live-verified on real workspaces: NOT NULL, PK/FK, `check:`/`allowed:`/table `checks:` incl. an exact-decimal equality, clustering, change data feed, statistics, tags, audit)
+## What the builder applies
+Status of the evidence: [appendix G](../appendix/G-verification-evidence.md). Constraints and the audit are hard steps (an error is counted); `features` (clustering, change data feed, statistics), `tags`, `COMMENT ON` and `format:` are **soft** steps: a failure prints `WARN` and does not count, so after a build also scan the output for `WARN` lines.
 - `NOT NULL` on every non-nullable column; informational **PK/FK** constraints; enforced **CHECK** constraints from `check:`, `allowed:` (auto for `choice`) and table `checks:`.
 - `ALTER TABLE ... CLUSTER BY (...)` + `OPTIMIZE` for facts with `cluster_by` (liquid clustering), `delta.enableChangeDataFeed = true`, `ANALYZE TABLE ... COMPUTE STATISTICS FOR ALL COLUMNS`.
 - Table tags `table_type`, `layer=gold`, `system.certification_status=certified`; column tags `pii=true` + `data_classification=personal` for `pii` columns, `data_classification=<x>` for `classification`.
@@ -23,8 +30,8 @@ Optional: *Monitor by slice (Beta)* to watch anomalies per value of a column; *D
 - `pii` tags on direct identifiers. Tags are metadata, not enforcement: enforcement (masks/filters/ABAC) is a security decision for the user.
 
 ## What to hand the user instead of doing it (security)
-Row filters, column masks, attribute-based policies, grants, sharing, adding users. Provide the exact statements and pointers (`08`) and the public tooling that automates them
-(`genierails`, `uc-declarative-abac` in `10-public-repos-and-docs.md`).
+Row filters, column masks, attribute-based policies, grants, sharing, adding users. Provide the exact statements and pointers ([safety](08-safety-permissions-privacy.md)) and the public tooling that automates them
+(`genierails`, `uc-declarative-abac` in [appendix A](../appendix/A-public-repos.md)).
 
 ## Maintenance
 Rolling date window: `history_days` ends "today" at build time; re-running shifts the window (dates change, keys do not). Re-run audits after any rebuild. After a rebuild of a metric view, re-apply tags.

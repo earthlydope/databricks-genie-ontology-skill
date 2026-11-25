@@ -5,8 +5,10 @@
     e.g. python3 serve_files.py /tmp/cells 8765 https://<your-workspace-host>
 
 Hardening (all enforced in code):
-  * the directory is REQUIRED and must be a dedicated folder: it is refused if it (or a parent of it up to the filesystem root's
-    first project marker) contains config.env, STATE.md, .env, .git or other secret-looking files;
+  * the directory is REQUIRED and must be a dedicated folder: startup is refused if ANYWHERE in its tree there is a file or folder
+    named config.env, STATE.md, .env, .git, .ssh, .aws and similar secret names;
+  * every request is resolved with realpath and must stay inside that folder (symlinks pointing outside are refused), and no
+    path component may be one of those secret names;
   * CORS allows ONLY the one origin you pass (no wildcard), so other websites open in your browser cannot read the files;
   * every request path must start with a random token printed at startup; directory listings are disabled;
   * only .py/.json/.js/.md/.txt/.yaml files are served; binds to 127.0.0.1 only.
@@ -37,11 +39,9 @@ if not os.path.isdir(root):
     refuse(f"{root} is not a directory")
 if not origin.startswith("http"):
     refuse("allowed-origin must be a full origin such as https://workspace-host.example")
-hits = [n for n in os.listdir(root) if n in SENSITIVE]
+hits = sorted({n for _, dirs, files in os.walk(root) for n in dirs + files if n in SENSITIVE})
 if hits:
-    refuse(f"{root} contains sensitive file(s) {hits}; copy only the generated files into a fresh directory")
-if os.path.realpath(os.getcwd()) == root and os.path.exists(os.path.join(root, ".git")):
-    refuse("do not serve a git working tree")
+    refuse(f"{root} contains sensitive name(s) {hits}; copy only the generated files into a fresh directory")
 os.chdir(root)
 TOKEN = secrets.token_urlsafe(12)
 
@@ -57,8 +57,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def list_directory(self, path):
         self.send_error(404)
 
+    def _inside_root(self):
+        target = os.path.realpath(self.translate_path(self.path))
+        if os.path.commonpath([target, root]) != root:                 # symlink or traversal leaving the folder
+            return False
+        return not any(part in SENSITIVE for part in os.path.relpath(target, root).split(os.sep))
+
     def send_head(self):
-        if not self._ok_path():
+        if not (self._ok_path() and self._inside_root()):
             self.send_error(404)
             return None
         return super().send_head()

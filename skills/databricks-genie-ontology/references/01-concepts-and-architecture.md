@@ -1,3 +1,9 @@
+---
+title: Concepts and architecture
+kind: reference
+summary: What Genie ontology, metric views, domains, Pages and certification are, which layer this skill builds, and how Genie was observed to answer.
+read_when: You need the vocabulary, or must tell a user what is GA or preview and what this skill does and does not deliver.
+---
 # 01 - Concepts and architecture
 
 ## The layers
@@ -27,7 +33,7 @@ Unity Catalog tables (Delta) + governance (permissions, lineage, data quality)
 - **Genie One**: the full-screen chat across agents, dashboards, metric views, Pages. Its launch uses a popup that the browser pane blocks; a user click is needed.
   A domain page's "Ask Genie" opens a domain-scoped Genie chat in a side panel and works for testing Pages.
 
-## How answers were observed to work (this build)
+## How answers were observed to work
 
 1. A question about a metric ("revenue last quarter by category") is answered from the attached **metric view** via generated SQL ("1 source").
 2. A *definition* question ("what does total revenue mean?") makes the domain chat **read the Page** (`Finance.Total Revenue`) and cite it, with a caveat that Pages are not certified.
@@ -46,6 +52,6 @@ Unity Catalog tables (Delta) + governance (permissions, lineage, data quality)
 
 ## Non-goals
 
-- Granting access, row filters, column masks, ABAC policies (security; user's call; see `08`).
+- Granting access, row filters, column masks, ABAC policies (security; user's call; see [safety](08-safety-permissions-privacy.md)).
 - The learned ontology layer. Check Databricks' current docs/availability and do not claim it.
 - Replacing a lakehouse pipeline: the synthetic generator is for demos and tests.

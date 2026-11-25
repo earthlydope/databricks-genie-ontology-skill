@@ -7,10 +7,12 @@ One YAML/JSON spec (see ../industries/*.yaml) drives:
   sql       - print every SQL statement the deploy would run (DDL, constraints, metric views, tags)
   docs      - write agent.md, pages/*.md, ui-checklist.md for the UI-only objects
   notebook  - build a ready-to-import Databricks notebook (library + spec + run cells)
+  --version - print the builder version
 
 The same file is embedded in the generated notebook, where `deploy(spark, spec)` runs the build.
 Pure python: no Spark import at module level, so it runs locally for validation and dry-runs.
 """
+import ast
 import copy
 import datetime as dt
 import json
@@ -23,6 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None
 
+__version__ = "1.1.0"   # keep in sync with CHANGELOG.md (tools/check_docs.py enforces it)
 SIMPLE_TYPES = {"int", "bigint", "string", "date", "boolean", "double", "timestamp"}
 GENS = {"seq", "template", "choice", "map", "uniform", "lognormal", "beta", "poisson", "bool", "fk", "date_key",
         "date", "lookup", "date_key_after", "date_key_before", "derived", "calendar"}
@@ -43,6 +46,98 @@ FORMATS = {
     "rate": "type: number\n      decimal_places:\n        type: exact\n        places: 4",
 }
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+
+# ----------------------------------------------------------------------------- expression safety
+# A spec is *code*: `derived.expr`, `check`, `checks` and `where` strings are evaluated locally with pandas and
+# `check`/`checks` are also pasted into DDL. Only run specs you trust. On top of that these strings must pass two
+# gates: (1) a character whitelist (no `@`, brackets, backslashes, attribute dots, `__`, `;`, comments) and
+# (2) an AST whitelist (names, numbers, strings, + - * / %, comparisons, and/or/not, abs()). Names must be columns.
+_EXPR_OK = re.compile(r"[A-Za-z0-9_ .+\-*/%()<>=!,]*")
+_EXPR_LITERAL = re.compile(r"'[A-Za-z0-9 _.\-]*'|\"[A-Za-z0-9 _.\-]*\"")
+_TEMPLATE_FIELD = re.compile(r"\{i(:[0-9]*d)?\}")
+_AST_OK = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod,
+           ast.UnaryOp, ast.USub, ast.UAdd, ast.Not, ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+           ast.Name, ast.Load, ast.Constant, ast.Call)
+
+
+def _ast_unsafe(py, names=None):
+    try:
+        tree = ast.parse(py.strip(), mode="eval")
+    except SyntaxError:
+        return "is not a valid expression"
+    for n in ast.walk(tree):
+        if not isinstance(n, _AST_OK):
+            return f"{type(n).__name__} is not allowed"
+        if isinstance(n, ast.Call) and not (isinstance(n.func, ast.Name) and n.func.id == "abs"
+                                            and len(n.args) == 1 and not n.keywords):
+            return "only abs(x) may be called"
+        if isinstance(n, ast.Constant) and not isinstance(n.value, (int, float, str, bool)):
+            return "unsupported constant"
+        if isinstance(n, ast.Name) and names is not None and n.id != "abs" and n.id not in names:
+            return f"unknown name '{n.id}'"
+    return None
+
+
+def unsafe_expr(expr, names=None, sql_prefix=None):
+    """Return why `expr` is not a plain arithmetic/comparison expression, or None when it is.
+    sql_prefix: the column name when `expr` is a column CHECK suffix such as '> 0'; `expr` is then SQL-subset."""
+    if not isinstance(expr, str):
+        return "must be a string"
+    if len(expr) > 300:
+        return "longer than 300 characters"
+    bare = _EXPR_LITERAL.sub("_", expr)                      # string literals: harmless content only
+    if not _EXPR_OK.fullmatch(bare):
+        return "contains characters other than letters, digits, spaces, + - * / % ( ) < > = ! , . and simple 'quoted' literals"
+    if "__" in bare or "--" in bare:
+        return "'__' and '--' are not allowed"
+    if re.search(r"[A-Za-z_]\s*\.|\.\s*[A-Za-z_]", bare):
+        return "attribute access is not allowed"
+    if bare.count("(") != bare.count(")"):
+        return "unbalanced parentheses"
+    py = expr if sql_prefix is None else _py_check_expr(f"{sql_prefix} {expr}")
+    return _ast_unsafe(py, names)
+
+
+def unsafe_template(tpl):
+    """Return why a `gen: template` string is unsafe (only {i} / {i:04d} fields are allowed), or None."""
+    if not isinstance(tpl, str):
+        return "must be a string"
+    rest = tpl.replace("{{", "").replace("}}", "")
+    rest = _TEMPLATE_FIELD.sub("", rest)
+    return "only {i} or {i:04d} style fields are allowed" if ("{" in rest or "}" in rest) else None
+
+
+def spec_expression_errors(spec, strict_names=True):
+    """All unsafe expression/template strings in a spec, as 'where: reason' strings (empty = clean).
+    strict_names=False leaves unknown-name reporting to validate_spec's friendlier messages."""
+    out = []
+    tables = spec.get("tables") or {}
+    for tname, t in tables.items():
+        cols = t.get("columns") or {}
+        mine = set(cols) if strict_names else None
+        for cname, c in cols.items():
+            if c.get("gen") == "derived" and (why := unsafe_expr(str(c.get("expr")), mine)):
+                out.append(f"{tname}.{cname}.expr: {why}")
+            if c.get("check") is not None and (why := unsafe_expr(str(c["check"]), mine, sql_prefix=cname)):
+                out.append(f"{tname}.{cname}.check: {why}")
+            if c.get("where") is not None:
+                ptab = str(c.get("fk", "")).split(".")[0]
+                pnames = set((tables.get(ptab, {}).get("columns") or {})) if strict_names else None
+                if why := unsafe_expr(str(c["where"]), pnames):
+                    out.append(f"{tname}.{cname}.where: {why}")
+            if c.get("gen") == "template" and (why := unsafe_template(c.get("template"))):
+                out.append(f"{tname}.{cname}.template: {why}")
+        for cn, expr in (t.get("checks") or {}).items():
+            if why := unsafe_expr(expr, mine, sql_prefix=""):
+                out.append(f"{tname}.checks.{cn}: {why}")
+    return out
+
+
+def assert_safe_spec(spec):
+    """Raise ValueError if any spec string could do more than arithmetic. Called before any eval or DDL."""
+    bad = spec_expression_errors(spec)
+    if bad:
+        raise ValueError("unsafe expression(s) in spec: " + "; ".join(bad))
 
 
 # ----------------------------------------------------------------------------- loading
@@ -75,7 +170,7 @@ def normalize(spec):
     s.setdefault("metric_views", {})
     s.setdefault("pages", [])
     tables = s.setdefault("tables", {})
-    needs_cal = any(c.get("gen") in ("date_key", "date_key_after") for t in tables.values()
+    needs_cal = any(c.get("gen") in ("date_key", "date_key_after", "date_key_before") for t in tables.values()
                     for c in (t.get("columns") or {}).values())
     if needs_cal and "dim_date" not in tables:
         tables["dim_date"] = {"kind": "dimension", "generator": "calendar",
@@ -118,6 +213,12 @@ def validate_spec(spec):
         return E, W
     tables = s["tables"]
     domains = set(s.get("domains", []))
+    gate = []                                          # same strict gate as generate_data/sql_constraints/deploy: validate green == they will not raise
+    for m in spec_expression_errors(s, strict_names=True):
+        loc = m.split(":")[0]
+        key = loc.rsplit(".", 1)[0] if loc.rsplit(".", 1)[-1] in ("expr", "check", "where", "template") else loc
+        gate.append((key, m))
+    gate_msgs = gate                                   # resolved after the per-column checks below, to avoid double-reporting unknown names
     for ident in ("catalog", "schema"):
         if s.get(ident) is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(s[ident])):
             E.append(f"{ident} '{s[ident]}': letters, digits and underscore only")
@@ -198,6 +299,11 @@ def validate_spec(spec):
                            if w not in names and w not in ("and", "or", "not", "abs", "True", "False")]
                 if unknown:
                     E.append(f"{where}: derived expr uses unknown names {sorted(set(unknown))}")
+            if c.get("check") is not None and not unsafe_expr(str(c["check"]), None, sql_prefix=cname):
+                bare = re.sub(r"'[^']*'", "", str(c["check"]))
+                unk = [w for w in re.findall(IDENT, bare) if w.lower() not in ("and", "or", "not", "abs", "true", "false") and w not in names]
+                if unk:
+                    E.append(f"{where}: check '{c['check']}' uses unknown names {sorted(set(unk))}")
             if g == "map":
                 if c.get("from") not in cols:
                     E.append(f"{where}: map.from '{c.get('from')}' is not a column")
@@ -216,6 +322,10 @@ def validate_spec(spec):
             for w in re.findall(IDENT, re.sub(r"'[^']*'", "", expr)):
                 if w.lower() not in ("and", "or", "not") and w not in names:
                     E.append(f"{tname}.checks.{cn}: unknown name '{w}'")
+    for key, m in gate_msgs:
+        if "unknown name" in m and any(e.startswith(key + ":") and "unknown" in e for e in E):
+            continue                                   # the friendlier message above already covers it
+        E.append(f"unsafe expression {m}")
     # metric views
     for mv, m in s.get("metric_views", {}).items():
         if not re.fullmatch(r"mv_[a-z0-9_]+", mv):
@@ -239,6 +349,11 @@ def validate_spec(spec):
                              f"flatten the key into the fact table or use a nested join")
             if j.get("name") in ("source",):
                 E.append(f"{mv}: join name 'source' is reserved")
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", str(j.get("name", ""))):
+                E.append(f"{mv}: join name '{j.get('name')}' must be snake_case")
+            for key in ("on", "table"):
+                if "$$" in str(j.get(key, "")):
+                    E.append(f"{mv}: '$$' is not allowed in join {key} (it terminates the SQL body)")
         seen = set()
         for kind in ("dimensions", "measures"):
             for item in m.get(kind, []):
@@ -315,6 +430,7 @@ def generate_data(spec, today=None):
     """Generate synthetic data as {table: pandas.DataFrame}. Deterministic for a given seed and date."""
     import numpy as np
     import pandas as pd
+    assert_safe_spec(spec)
     s = spec
     rng = np.random.default_rng(int(s["seed"]))
     today = today or (dt.date.fromisoformat(str(s["as_of"])) if s.get("as_of") else dt.date.today())
@@ -328,6 +444,8 @@ def generate_data(spec, today=None):
             if c0.get("gen") == "fk" and c0.get("unique"):
                 p0, k0 = c0["fk"].split(".")
                 pool0 = out[p0].query(c0["where"]) if c0.get("where") else out[p0]
+                if len(pool0[k0]) == 0:
+                    raise ValueError(f"{tname}: unique fk {c0['fk']} has an empty parent pool (check its `where`)")
                 n = min(n, len(pool0[k0]))
         df = pd.DataFrame(index=range(n))
         if t.get("generator") == "calendar":
@@ -349,7 +467,13 @@ def generate_data(spec, today=None):
                 raise ValueError(f"{tname}: circular via/from dependency among {pending}")
             order += ready
             pending = [c for c in pending if c not in ready]
-        order += [c for c, d in cols.items() if d["gen"] == "derived"]
+        derived = [c for c, d in cols.items() if d["gen"] == "derived"]
+        while derived:                                # derived columns may use other derived columns: dependencies first
+            ready = [c for c in derived if not (set(re.findall(IDENT, cols[c]["expr"])) & (set(derived) - {c}))]
+            if not ready:
+                raise ValueError(f"{tname}: circular dependency among derived columns {derived}")
+            order += ready
+            derived = [c for c in derived if c not in ready]
         for cname in order:
             c = cols[cname]
             g, ty = c["gen"], c["type"]
@@ -519,6 +643,7 @@ def sql_create_table(spec, tname, catalog=None, schema=None):
 
 def sql_constraints(spec, catalog=None, schema=None, drop_first=True):
     """PK, FK and CHECK constraints. FK/PK are informational in Unity Catalog; CHECK is enforced."""
+    assert_safe_spec(spec)
     pk, fk, ck = [], [], []
     for tname, t in spec["tables"].items():
         full = fq(spec, tname, catalog, schema)
@@ -670,6 +795,7 @@ def deploy(spark, spec, catalog=None, schema=None, steps=None, with_format=True,
     tool) unless force=True. Data is generated relative to today unless the spec sets `as_of: YYYY-MM-DD`.
     """
     steps = steps or DEFAULT_STEPS
+    assert_safe_spec(spec)
     errors = []
     report = {"errors": errors, "audit": {}}
 
@@ -695,13 +821,13 @@ def deploy(spark, spec, catalog=None, schema=None, steps=None, with_format=True,
             run(st)
         spark.sql(f"USE CATALOG {cat}")
         spark.sql(f"USE SCHEMA {sch}")
+    if not force and {"tables", "load", "constraints"} & set(steps):   # every step that overwrites or alters table data/keys
+        for t in order:
+            full = fq(spec, t, cat, sch)
+            if spark.catalog.tableExists(full) and not _managed(spark, full):
+                raise RuntimeError(f"{full} already exists and was not created by genie_onto; refusing to replace it "
+                                   f"(use a new schema, or deploy(..., force=True) if you really mean it)")
     if "tables" in steps:
-        if not force:
-            for t in order:
-                full = fq(spec, t, cat, sch)
-                if spark.catalog.tableExists(full) and not _managed(spark, full):
-                    raise RuntimeError(f"{full} already exists and was not created by genie_onto; refusing to replace it "
-                                       f"(use a new schema, or deploy(..., force=True) if you really mean it)")
         for st in sql_drop_fks(spec, cat, sch):
             tbl = st.split()[2]
             if spark.catalog.tableExists(tbl):  # first run: nothing to drop, stay quiet
@@ -762,10 +888,23 @@ def cleanup(spark, spec, confirm, catalog=None, schema=None):
     for ident in (cat, sch):
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(ident)):
             raise ValueError(f"unsafe catalog/schema name: {ident!r}")
-    for mv in spec["metric_views"]:
-        spark.sql(f"DROP VIEW IF EXISTS {fq(spec, mv, cat, sch)}")
+    problems = []
+    for mv in spec["metric_views"]:      # views carry no marker: dropped by name, so keep one spec per schema
+        try:
+            spark.sql(f"DROP VIEW IF EXISTS {fq(spec, mv, cat, sch)}")
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"{mv}: {str(e)[:160]}")
     for t in reversed(_topo(spec["tables"])):
-        spark.sql(f"DROP TABLE IF EXISTS {fq(spec, t, cat, sch)}")
+        full = fq(spec, t, cat, sch)
+        try:
+            if spark.catalog.tableExists(full) and not _managed(spark, full):
+                problems.append(f"{t}: kept (it was not created by genie_onto)")
+                continue
+            spark.sql(f"DROP TABLE IF EXISTS {full}")
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"{t}: {str(e)[:160]}")
+    for p in problems:
+        print("WARN  cleanup " + p)
     left = spark.sql(f"SHOW TABLES IN {cat}.{sch}").count()
     if left == 0:
         spark.sql(f"DROP SCHEMA IF EXISTS {cat}.{sch}")
@@ -824,7 +963,7 @@ def build_notebook(spec_path, as_cell=False):
            'dbutils.widgets.text(W_CAT, spec["catalog"], "Catalog")\n'
            'dbutils.widgets.text(W_SCH, spec["schema"], "Schema")\n'
            'dbutils.widgets.text(W_DOM, "no", "Domains created in UI? (yes/no)")\n'
-           'domains_done = dbutils.widgets.get(W_DOM) == "yes"\n'
+           'domains_done = dbutils.widgets.get(W_DOM).strip().lower() == "yes"\n'
            '# once the Domains exist, only re-apply tags: do NOT rebuild tables/data/views (that would wipe UI edits)\n'
            'report = deploy(spark, spec, catalog=dbutils.widgets.get(W_CAT), schema=dbutils.widgets.get(W_SCH),\n'
            '                steps=["tags"] if domains_done else None, domains=domains_done)\n')
@@ -835,11 +974,24 @@ def build_notebook(spec_path, as_cell=False):
     sep = "\n# COMMAND ----------\n\n"
     return ("# Databricks notebook source\n# MAGIC %md\n# MAGIC # " + spec.get("title", spec["industry"]) +
             " - Genie ontology foundation\n# MAGIC Generated by genie_onto.py. Run all. After creating the Domains in the UI, set the "
-            "`domains_created` widget to `yes` and re-run (that re-run only re-applies tags).\n" + sep + lib + sep + spec_lit + sep + run)
+            "`domains_created_<industry>` widget to `yes` and re-run (that re-run only re-applies tags).\n" + sep + lib + sep + spec_lit + sep + run)
 
 
 # ----------------------------------------------------------------------------- CLI
+def all_sql(spec):
+    """Every statement the build runs, in order (the `sql` command, and the golden-digest test that pins generated SQL)."""
+    stm = sql_schema(spec) + [sql_create_table(spec, t) for t in _topo(spec["tables"])]
+    pk, fk, ck = sql_constraints(spec)
+    stm += ["-- (data is loaded by deploy() with generate_data())"] + pk + fk + ck
+    for mv in spec["metric_views"]:
+        stm += [sql_metric_view(spec, mv), sql_metric_view_comment(spec, mv)]
+    return stm + sql_features(spec) + sql_tags(spec, domains=True)
+
+
 def _cli(argv):
+    if len(argv) == 2 and argv[1] == "--version":
+        print(__version__)
+        return 0
     if len(argv) < 3 or argv[1] not in ("validate", "check", "sql", "docs", "notebook"):
         print(__doc__)
         return 2
@@ -852,10 +1004,14 @@ def _cli(argv):
     if cmd == "notebook":
         out = args[1]
         os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-        text = build_notebook(args[0], as_cell="--cell" in args)
+        as_cell_flag = "--cell" in args
+        text = build_notebook(args[0], as_cell=as_cell_flag)
         with open(out, "w", encoding="utf-8") as fh:
             fh.write(text)
         print(f"wrote {out} ({len(text)} chars)")
+        if as_cell_flag and len(text) > 72000:
+            print("note: larger than the 72 KB cell that was pasted successfully in testing; after pasting, read the cell back and compare its length "
+                  "(references/04-browser-automation-playbook.md), or import the notebook file instead")
         return 0
     for path in args:
         spec = load_spec(path)
@@ -879,13 +1035,7 @@ def _cli(argv):
             if not bad:
                 print(f"OK    {os.path.basename(path)}: data checks pass " + ", ".join(f"{t}={len(d)}" for t, d in data.items()))
         elif cmd == "sql":
-            stm = sql_schema(spec) + [sql_create_table(spec, t) for t in _topo(spec["tables"])]
-            pk, fk, ck = sql_constraints(spec)
-            stm += ["-- (data is loaded by deploy() with generate_data())"] + pk + fk + ck
-            for mv in spec["metric_views"]:
-                stm += [sql_metric_view(spec, mv), sql_metric_view_comment(spec, mv)]
-            stm += sql_features(spec) + sql_tags(spec, domains=True)
-            print(";\n".join(stm) + ";")
+            print(";\n".join(all_sql(spec)) + ";")
     return rc
 
 

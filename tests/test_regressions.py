@@ -164,10 +164,11 @@ class TestServeFilesHardening(unittest.TestCase):
 
 class TestGitignore(unittest.TestCase):
     def test_template_state_file_is_not_ignored(self):
+        # behaviour is tested with `git check-ignore` in tests/test_security.py; here: the negation that keeps the template tracked must exist
         root = os.path.dirname(HERE)
         text = open(os.path.join(root, ".gitignore")).read().splitlines()
-        self.assertIn("/STATE.md", text)
-        self.assertNotIn("STATE.md", text)       # an unanchored pattern would also ignore templates/STATE.md
+        self.assertIn("STATE.md", text)
+        self.assertIn("!**/templates/STATE.md", text)
 
 
 if __name__ == "__main__":

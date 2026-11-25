@@ -1,9 +1,12 @@
-# Local state and secrets: never commit. Anchored with a leading slash so templates/STATE.md is NOT ignored.
-/STATE.md
-/config.env
-/.env
+# Local state and secrets: never commit. STATE.md is ignored at any depth except the shipped template.
+STATE.md
+!**/templates/STATE.md
+config.env
+.env
+.env.*
+.databrickscfg
 *.local
-/out/
+out/
 *.cell.py
 # Python / tooling
 __pycache__/

@@ -1,3 +1,9 @@
+---
+title: Enriching with Genie Code
+kind: reference
+summary: The draft, review, run pattern for using Genie Code to add comments and enriched views safely.
+read_when: You want richer metadata or derived columns without hand-writing all the SQL.
+---
 # 07 - Enriching tables and metadata with Genie Code (draft, review, run)
 
 Genie Code is Databricks' in-product coding assistant (side panel, sparkle icon in the top bar). It can inspect tables and write SQL.
@@ -26,4 +32,4 @@ Use it as an **author**, not as an unsupervised operator: you keep control of wh
 
 ## Metadata enrichment ideas (no data change)
 - Table/column comments for every asset lacking one; synonyms in metric views; Page definitions for every cross-fact KPI; domain descriptions.
-- Public helpers: `genie-ontology-readiness` (assess readiness pillars), `databricks-genie-workbench` and `genie-best-practices-agent` (score/optimize an agent) - see `10-public-repos-and-docs.md`.
+- Public helpers: `genie-ontology-readiness` (assess readiness pillars), `databricks-genie-workbench` and `genie-best-practices-agent` (score/optimize an agent) - see [appendix A](../appendix/A-public-repos.md).

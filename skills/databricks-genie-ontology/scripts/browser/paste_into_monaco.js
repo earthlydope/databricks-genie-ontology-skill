@@ -2,9 +2,9 @@
 // Run inside the Databricks notebook page (javascript_tool). Then focus the cell and press shift+Return to run.
 //
 // Usage A (small text inline):   set CODE below.
-// Usage B (large file):          serve it from a throwaway local server with CORS and set URL
-//                                 (python3 -m http.server + a handler adding Access-Control-Allow-Origin: *),
-//                                 fetch with credentials:'omit'. Stop the server afterwards.
+// Usage B (large file):          serve it with scripts/browser/serve_files.py <dir> <port> <workspace-origin>
+//                                 (127.0.0.1 only, CORS for that one origin, random path token; never a wildcard server),
+//                                 set URL to http://127.0.0.1:PORT/<token>/<file>, fetch with credentials:'omit'. Stop the server afterwards.
 (async () => {
   const CODE = null;                       // e.g. "print('hello')"
   const URL = null;                        // e.g. "http://127.0.0.1:8765/build.cell.py"

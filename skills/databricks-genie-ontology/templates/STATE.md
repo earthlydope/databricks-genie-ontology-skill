@@ -9,7 +9,7 @@ Build notebook: <id/url>                         Agent: <id/url>
 - [ ] build: Done. 0 error(s); audits PASS; row counts: <...>
 - [ ] metric views reconciled with SQL (<which measure, result>)
 - [ ] domains created + published: <list>
-- [ ] tags applied (domains_created=yes); domain counts match
+- [ ] tags applied (widget domains_created_<industry> = yes); domain counts match
 - [ ] agent created, sources attached, certified, in domain, renamed
 - [ ] pages published: <names + ids>
 - [ ] sample questions verified: <q -> result>

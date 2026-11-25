@@ -11,8 +11,10 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install pandas numpy pyyaml
-      - name: Unit + pack tests
+      - name: Unit, pack, security and documentation tests
         run: python -m unittest discover -s tests -v
+      - name: Documentation linter
+        run: python tools/check_docs.py
       - name: Validate and check every pack
         run: |
           cd skills/databricks-genie-ontology

@@ -1,3 +1,9 @@
+---
+title: Gotchas and fixes
+kind: reference
+summary: Symptom, cause and fix tables for build/SQL, UI automation and Genie behaviour problems that were hit for real.
+read_when: Something failed or behaved unexpectedly.
+---
 # 05 - Gotchas and fixes (symptom -> cause -> fix)
 
 Each row was hit for real unless marked *(precaution)*.
@@ -22,6 +28,9 @@ Each row was hit for real unless marked *(precaution)*.
 | Primary key add fails | Column nullable | Columns are created `NOT NULL`; make sure data has no nulls |
 | First run prints `TABLE_OR_VIEW_NOT_FOUND` warnings on drop-constraint | Nothing to drop yet | Fixed: builder checks `tableExists` first |
 | Re-using one notebook for a second pack built into the first pack's schema (seen live) | Databricks keeps widget values per widget name | Fixed: generated widget names carry the pack name (`schema_name_<industry>`); still prefer one notebook per spec |
+| `ERROR ... unsafe expression <table.column.field>: <reason>` from `validate` (the same text as a `ValueError` from `check`/`sql`/`deploy`) | A `derived`/`check`/`checks`/`where`/`template` string has an unknown column name (typo) or uses something other than arithmetic and comparisons (v1.1.0 safety gate) | Fix the name, or rewrite it with column names, numbers, `+ - * / %`, comparisons, `and/or/not`, `abs()`; see [spec format, expression safety](03-spec-format.md#expression-safety) |
+| `circular dependency among derived columns` / `unique fk ... has an empty parent pool` | Derived columns reference each other in a loop; a `where` filter on a unique fk matches no parent rows | Break the loop; loosen the `where` |
+| `WARN cleanup <table>: kept (it was not created by genie_onto)` | `cleanup()` only drops tables carrying the `genie_onto.managed` marker | Drop it yourself if you really mean it; metric views are dropped by name, so keep one spec per schema |
 
 ## UI / automation
 
@@ -29,7 +38,7 @@ Each row was hit for real unless marked *(precaution)*.
 |---|---|---|
 | Pasted/typed code is mangled (extra indents, doubled quotes) | Monaco auto-indent/auto-close | Paste with a synthetic paste event; never type code |
 | Cmd+V does nothing; `clipboard.readText` denied | Synthetic key events do not paste; clipboard read needs permission | Use the synthetic paste event with `DataTransfer` |
-| `Failed to fetch` loading a local file from the page | CORS/private-network preflight on first attempts | Server with `Access-Control-Allow-Origin: *` and `Access-Control-Allow-Private-Network: true`, `credentials:'omit'`; retry once. Script tags are blocked |
+| `Failed to fetch` loading a local file from the page | CORS/private-network preflight on first attempts | Use `scripts/browser/serve_files.py` (it sends CORS for exactly one origin you pass, plus `Access-Control-Allow-Private-Network: true`; never a wildcard) and fetch with `credentials:'omit'`; retry once. Script tags are blocked |
 | Output not found by `innerText` | Notebook output is virtualized | Scroll `.notebook-scrollable-container` in steps (`read_cell_output.js`) |
 | "Exception" found in output but run was fine | The cell **source** contains the word | Match anchored lines `^ERROR ` / `Done\. \d+ error` |
 | Clicks land in the wrong place | Screenshot frame != CSS viewport | `coords.js`; click by ref when possible |
@@ -51,3 +60,6 @@ Each row was hit for real unless marked *(precaution)*.
 | Agent says it cannot compute X | Missing dimension or measure | Add to the metric view; re-test; update instructions if two views disagree |
 | Agent invents a time range | Instruction missing | Add "default to the trailing 12 months and state the range used" |
 | Return-rate style answers include a disclosure line | Instruction asked for it | Keep: it is the audit trail for derived ratios |
+
+## Known limitations
+Open items that are understood but not fixed (data-realism gaps in two packs, FK coverage for two date generators, and more) are tracked with evidence in [appendix F](../appendix/F-known-limitations.md).

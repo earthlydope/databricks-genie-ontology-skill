@@ -1,0 +1,13 @@
+{
+ "bfsi_banking.yaml": "cd909006-25fc63fc-94c5a4bc-641c638b-fc46ea14-717d16f1-4839f70c-f529bb65",
+ "bfsi_insurance.yaml": "12f38ed8-9225fe47-d947b304-c359def6-d263827f-9c31a9f2-e0d27cbd-3f667014",
+ "cpg_fmcg.yaml": "194d0202-07214a99-8bff7089-29df8f18-dea6fd19-321f8a45-5b66bea9-f864585b",
+ "education.yaml": "add514d2-0c4862e1-0186cbdd-bc059d8f-0e214f58-07b7e65c-c10a3e92-fd72f54d",
+ "energy_utilities.yaml": "2f6cbac4-849cd755-86dd980a-0c5ad1de-da758c39-5ef49cdf-a0d83d1c-de201d7b",
+ "hls_pharma_lifesciences.yaml": "5ad49a59-7e83cdc8-96db9c42-6ac67601-562a9ed6-a0780fec-4ba25da2-f7557f02",
+ "hls_provider.yaml": "7a71b47f-06da8c4e-76ff5359-cb688cec-2cbe945e-8275bfc3-4e0558b7-7561ba1d",
+ "manufacturing.yaml": "ce837cff-abdb9a13-44b7315f-1ce54633-16a7016b-9f3ac0eb-5ee98ac2-b4396451",
+ "retail.yaml": "236ccc0f-72559a16-a6b67b30-043dc2fe-fb4fe2fc-15687ee0-006eb26c-0199c5a8",
+ "supply_chain_logistics.yaml": "480c582a-fb906562-48710700-8bd2cf2f-deab0e4f-1d6c09be-0fbabf04-67d19386",
+ "telecom.yaml": "4404b9ed-d9a289b9-ba599e01-1bc2a3b4-e8ab12cf-81d78d3e-af2edd04-8b9e0883"
+}

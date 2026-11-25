@@ -1,4 +1,10 @@
-# 11 - Industry guide
+---
+title: Industry guide
+kind: appendix
+summary: Per-industry KPIs, cross-fact Pages, data-protection notes and extension ideas, plus how to add a new industry pack.
+read_when: You are choosing, adapting or authoring an industry pack.
+---
+# Appendix B - Industry guide
 
 Packs live in `industries/`. Each is a *starting point*: rename, localize synonyms, and extend. Coverage was chosen for the verticals that data/AI delivery teams
 meet most often (BFSI, retail/CPG, manufacturing, healthcare/life sciences) plus common adjacent ones (telecom, energy/utilities, supply chain, education).
@@ -43,7 +49,7 @@ For every industry: the KPIs the pack models, the **cross-fact KPIs that need a 
 ## Manufacturing (`manufacturing.yaml`)
 - Models: production by line/shift (planned, downtime, ideal, produced, scrapped), downtime events. Measures: units, scrap rate, availability, performance, quality, **OEE** (single measure as the product of three ratios on summed values).
 - Page-worthy: **OEE** (never average OEE percentages), **Scrap rate**. Production minutes and recorded stoppages come from different sources: instruct the agent to say which it used.
-- Verified: the OEE measure equalled an independent recomputation from the fact table.
+- Evidence: an earlier builder revision's OEE measure equalled an independent recomputation (see [appendix G](G-verification-evidence.md)).
 - Extend: maintenance (MTBF/MTTR), energy per unit, supplier quality, traceability, sensor time series.
 
 ## Telecom (`telecom.yaml`)
@@ -71,4 +77,4 @@ For every industry: the KPIs the pack models, the **cross-fact KPIs that need a 
 ## Adding a new industry (30-60 min)
 1. Copy `templates/spec_template.yaml`. 2. Write 3-5 domains. 3. Model 3-5 dimensions and 2-3 facts with a grain sentence each; use `lookup`/`derived` for consistency and a skewed generator for tail events.
 4. Two metric views (3-6 measures each, synonyms in business language). 5. One Page per cross-fact KPI. 6. Agent instructions with each formula and a privacy line.
-7. `validate` (0/0) and `check`; build once on a throwaway schema; verify `MEASURE()` against SQL; open a PR with the pack.
+7. `validate` (0/0) and `check`; optionally build once on a throwaway schema and verify `MEASURE()` against SQL (only that earns status `Live`, recorded in [appendix G](G-verification-evidence.md)); open a PR with the pack as `Local only` (CONTRIBUTING.md in the repository root, not part of the installed skill, lists the doc steps).

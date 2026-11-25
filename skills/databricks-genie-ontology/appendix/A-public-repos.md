@@ -1,4 +1,10 @@
-# 10 - Public repositories and docs
+---
+title: Public repositories and docs
+kind: appendix
+summary: Verified links to official Databricks docs, the example this skill generalizes, and public semantics/Genie/governance repos with licence notes.
+read_when: You want prior art, accelerators or official documentation.
+---
+# Appendix A - Public repositories and docs
 
 Links are **referenced, not copied**. Verified to exist and not be archived on 2026-11-20 with `scripts/verify_links.py`; star counts and licenses change. Many Databricks
 repos use the Databricks License (source-available, not OSI open source): read each license before reusing code. Repos marked **†** publish **no license file**: by default that means all rights reserved, so read them but do not copy from them.
